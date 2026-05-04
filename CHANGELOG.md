@@ -9,6 +9,66 @@ minor and are called out in the entry.
 
 Nothing yet.
 
+## [0.3.0] - 2026-05-04
+
+Pub/Sub support. Standard `Redis::subscribe()` and `Redis::psubscribe()`
+work on single-node connections; cluster connections raise a clear
+error pointing at the single-node workaround. v0.1 / v0.2 behaviour
+unchanged.
+
+### Added
+
+- `Resp3\Laravel\Client\Resp3ClientInterface`: minimal contract
+  (`command`, `readNext`, `close`, `isConnected`) so consumers and
+  tests can swap implementations without inheriting the final
+  `Resp3Client`.
+- `Resp3\Laravel\Client\Resp3Client::readNext()`: blocks on the socket
+  for one complete reply or push frame. Pub/sub consumes server
+  pushes through this without writing new commands.
+- `Resp3\Laravel\PubSub\SubscriptionLoop`: blocking loop that drives
+  SUBSCRIBE/PSUBSCRIBE on a dedicated socket. Dispatches `message`
+  frames as `($payload, $channel)` and `pmessage` frames as
+  `($payload, $channel, $pattern)`. Returning `false` from the
+  callback exits cleanly with UNSUBSCRIBE. Subscribe and unsubscribe
+  acks are silently filtered.
+- Signal handling: with `pcntl` loaded, SIGTERM and SIGINT exit the
+  loop and run UNSUBSCRIBE before close. Subscribers under Horizon /
+  Supervisor / systemd shut down without orphan connections.
+- `Resp3\Laravel\Connections\Resp3Connection::createSubscription()`:
+  builds a fresh subscribe-only `Resp3Client` (no persistent flag,
+  no read timeout) and runs the loop. The original connection stays
+  free for normal commands.
+- 6 unit tests in `SubscriptionLoopTest` exercising dispatch paths
+  with a stub client.
+- Live publish/subscribe round trip tests in
+  `tests/Feature/PubSubTest` using `proc_open` to start a subscriber
+  child and publishing from the parent. Covers both subscribe and
+  psubscribe.
+- `tests/Feature/ClusterPubSubTest` confirms cluster pub/sub raises
+  `BadMethodCallException` with a hint pointing at the single-node
+  workaround.
+
+### Changed
+
+- `Resp3\Laravel\Client\Resp3Client` implements `Resp3ClientInterface`.
+  No public API change.
+- Connection setup: `timeout: 0.0` on the constructor now means
+  "block forever between reads" rather than "fail immediately on
+  connect". The connect step clamps to a 5s minimum so subscribe
+  loops can negotiate the initial socket. On macOS,
+  `stream_set_timeout(socket, 0, 0)` flips to immediate timeout, so
+  the timeout is left at the OS default when 0 is requested.
+- `Resp3\Laravel\Connections\Resp3ClusterConnection::createSubscription()`
+  error message now points at the single-node workaround and the
+  v0.4 sharded pub/sub plan instead of just refusing.
+
+### Removed
+
+- "No Pub/Sub" from the Limitations list. Cluster pub/sub
+  (SSUBSCRIBE) remains out of scope for v0.3.
+
+[0.3.0]: https://github.com/webpatser/laravel-resp3-cache/releases/tag/v0.3.0
+
 ## [0.2.0] - 2026-05-04
 
 Redis Cluster mode. Existing Laravel apps drop in by setting
@@ -119,7 +179,7 @@ driver backed by the [ext-resp3][php-resp3] C parser.
 - No Pub/Sub (`subscribe`, `psubscribe` throw `BadMethodCallException`).
 - No connection pooling beyond `STREAM_CLIENT_PERSISTENT`.
 
-[Unreleased]: https://github.com/webpatser/laravel-resp3-cache/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/webpatser/laravel-resp3-cache/compare/v0.3.0...HEAD
 [0.1.0]: https://github.com/webpatser/laravel-resp3-cache/releases/tag/v0.1.0
 
 [kac]: https://keepachangelog.com/en/1.1.0/

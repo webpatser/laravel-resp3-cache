@@ -126,11 +126,40 @@ Local cluster boot works on Linux. Docker Desktop on macOS sometimes
 fails the cluster-bus handshake when nodes announce 127.0.0.1; in that
 case rely on CI for the cluster suite.
 
+## Pub/Sub
+
+Standard Laravel `Redis::subscribe()` and `Redis::psubscribe()` work on
+single-node connections:
+
+```php
+use Illuminate\Support\Facades\Redis;
+
+Redis::subscribe(['user-events'], function (string $message, string $channel) {
+    echo "[$channel] $message\n";
+});
+
+Redis::psubscribe(['user.*'], function (string $message, string $channel, string $pattern) {
+    // ...
+});
+```
+
+The subscribe loop opens a dedicated socket so the original connection
+stays free for normal commands. Returning `false` from the callback
+exits the loop cleanly (UNSUBSCRIBE + close).
+
+If the `pcntl` extension is loaded, SIGTERM and SIGINT break the loop
+and clean up. That makes `php artisan` consumers behave well under
+process supervisors (Horizon, Supervisor, systemd) without orphan
+connections.
+
+Cluster mode does not support pub/sub yet. Open a single-node
+`Redis::connection()` pointed at one of the cluster's master nodes for
+pub/sub, or wait for sharded pub/sub (SSUBSCRIBE) in v0.4.
+
 ## Limitations
 
 - No Sentinel failover.
-- No Pub/Sub (Laravel cache does not use it; subscribe support comes if
-  there is demand).
+- Cluster pub/sub (SSUBSCRIBE) not supported.
 - No connection pooling beyond `STREAM_CLIENT_PERSISTENT`.
 - Cross-slot multi-key commands (`MGET`, `MSET`, transactions) are
   rejected; use hash tags to colocate keys.
