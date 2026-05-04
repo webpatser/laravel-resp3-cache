@@ -152,9 +152,48 @@ and clean up. That makes `php artisan` consumers behave well under
 process supervisors (Horizon, Supervisor, systemd) without orphan
 connections.
 
-Cluster mode does not support pub/sub yet. Open a single-node
-`Redis::connection()` pointed at one of the cluster's master nodes for
-pub/sub, or wait for sharded pub/sub (SSUBSCRIBE) in v0.5.
+For cluster mode, regular `subscribe`/`psubscribe` still raise
+`BadMethodCallException`: the global pub/sub bus does not scale across
+a cluster, which is why Redis 7 introduced sharded pub/sub. Use
+`ssubscribe()` (see below) for per-shard delivery, or open a single-node
+`Redis::connection()` pointed at one master for global broadcast
+semantics.
+
+### Sharded pub/sub on cluster
+
+Redis 7 (and Valkey) ship `SSUBSCRIBE` / `SUNSUBSCRIBE` / `SPUBLISH`:
+channels CRC16-hash to a slot just like keys, and only subscribers on
+that slot's master receive the message. No cluster-bus fanout, linear
+scalability.
+
+```php
+use Illuminate\Support\Facades\Redis;
+
+// Subscriber: every channel must hash to the same slot. Use {hash tag}
+// syntax to colocate them, exactly like multi-key MGET / MSET.
+Redis::connection()->ssubscribe(
+    ['orders.{user42}.created', 'orders.{user42}.updated'],
+    function (string $message, string $channel) {
+        // ...
+    },
+);
+
+// Publisher: route via SPUBLISH (not PUBLISH) so the message lands on
+// the same shard as the subscribers.
+Redis::connection()->command('SPUBLISH', ['orders.{user42}.created', $payload]);
+```
+
+Channels in a single `ssubscribe()` call that hash to different slots
+raise `RuntimeException` with a CROSSSLOT-style hint; add a `{tag}` to
+group them. Sharded pub/sub has no pattern subscribe equivalent
+(`SPSUBSCRIBE` is not part of the Redis spec); for pattern matching on
+a cluster, design your channel naming so the prefix lives inside the
+hash tag.
+
+`SUNSUBSCRIBE` runs on every exit path (callback returning `false`,
+SIGTERM/SIGINT with `pcntl` loaded, socket drop). Subscriber sockets are
+dedicated and never persistent, mirroring the single-node pub/sub
+behaviour shipped in v0.3.
 
 ## Sentinel mode
 
@@ -231,10 +270,13 @@ make sentinel-down    # tears down manually
 
 - Sentinel replica reads use random selection only; round-robin and
   weighted strategies land later.
-- Cluster pub/sub (SSUBSCRIBE) not supported.
+- Sharded pub/sub has no pattern equivalent (`SPSUBSCRIBE` is not in
+  the Redis spec); design channel names so the prefix lives inside the
+  `{hash tag}`.
 - No connection pooling beyond `STREAM_CLIENT_PERSISTENT`.
-- Cross-slot multi-key commands (`MGET`, `MSET`, transactions) are
-  rejected; use hash tags to colocate keys.
+- Cross-slot multi-key commands (`MGET`, `MSET`, transactions) and
+  multi-channel `ssubscribe()` calls are rejected; use hash tags to
+  colocate keys or channels.
 
 ## Compatibility
 

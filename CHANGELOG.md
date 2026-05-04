@@ -9,6 +9,61 @@ minor and are called out in the entry.
 
 Nothing yet.
 
+## [0.6.0] - 2026-05-04
+
+Sharded pub/sub on cluster mode. `Redis::connection()->ssubscribe()` and
+`SPUBLISH` now route by CRC16 slot just like keys, so subscribers and
+publishers land on the same shard without going through the cluster
+bus. Closes the v0.2 "Cluster pub/sub not supported" limitation.
+
+### Added
+
+- `Resp3\Laravel\Connections\Resp3ClusterConnection::ssubscribe(array $channels, Closure $cb)`:
+  validates that every channel hashes to the same CRC16 slot (CROSSSLOT
+  with hash-tag hint otherwise), asks the router for the slot's master,
+  opens a dedicated subscriber socket on it, and runs the existing
+  `SubscriptionLoop` with method `'ssubscribe'`. `SUNSUBSCRIBE` runs on
+  every exit path, mirroring the single-node pub/sub teardown.
+- `Resp3\Laravel\Cluster\Resp3ClusterRouter::subscriberAddrForChannel(string $channel)`:
+  CRC16 slot lookup that returns the master `host:port` for a channel.
+- `Resp3\Laravel\Cluster\Resp3ClusterRouter::getDataPlaneOptions()`:
+  exposes the router's auth/tls/timeout settings so the cluster
+  connection can spin up subscriber sockets without duplicating the
+  constructor wiring.
+- `SPUBLISH` entry in `Resp3ClusterRouter::extractKeys()`: routes
+  `Redis::command('SPUBLISH', $channel, $msg)` to the channel's slot
+  master.
+- `Resp3\Laravel\PubSub\SubscriptionLoop` accepts `'ssubscribe'` as a
+  method, dispatches `smessage` frames to the same `($payload, $channel)`
+  callback shape as `message`, and sends `SUNSUBSCRIBE` on cleanup.
+- 4 new unit tests for the SubscriptionLoop sharded path (method
+  acceptance, smessage dispatch, SUNSUBSCRIBE on exit, unknown method
+  rejected).
+- 4 new unit tests for the cluster router (subscriber addr via CRC16,
+  hash-tag colocation, data-plane options snapshot, SPUBLISH extractKeys).
+- 4 new unit tests for the cluster connection (same-slot validation,
+  cross-slot rejection, hint message, empty channels guard).
+- `tests/Feature/ClusterShardedPubSubTest`: end-to-end SSUBSCRIBE +
+  SPUBLISH round trip via a `proc_open` subscriber child against the
+  local 6-node cluster, plus the cross-slot rejection assertion and
+  the regular-subscribe still-blocked assertion.
+
+### Changed
+
+- `Resp3\Laravel\Connections\Resp3ClusterConnection::createSubscription()`
+  rejection message now points users at `ssubscribe()` for sharded
+  delivery and the single-node `Redis::connection()` workaround for
+  global pub/sub. The `BadMethodCallException` itself stays.
+- `tests/Feature/ClusterPubSubTest` hint matcher updated to accept the
+  new wording.
+- README gains a "Sharded pub/sub on cluster" subsection under Pub/Sub.
+  The Cluster mode pub/sub paragraph is rewritten to describe both the
+  global rejection and the sharded option. Limitations updated:
+  cluster pub/sub no longer listed; replaced with a note about the
+  missing `SPSUBSCRIBE` (Redis spec limitation).
+
+[0.6.0]: https://github.com/webpatser/laravel-resp3-cache/releases/tag/v0.6.0
+
 ## [0.5.0] - 2026-05-04
 
 Sentinel replica reads. Set `'sentinel_read_replicas' => true` on the
@@ -298,7 +353,7 @@ driver backed by the [ext-resp3][php-resp3] C parser.
 - No Pub/Sub (`subscribe`, `psubscribe` throw `BadMethodCallException`).
 - No connection pooling beyond `STREAM_CLIENT_PERSISTENT`.
 
-[Unreleased]: https://github.com/webpatser/laravel-resp3-cache/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/webpatser/laravel-resp3-cache/compare/v0.6.0...HEAD
 [0.1.0]: https://github.com/webpatser/laravel-resp3-cache/releases/tag/v0.1.0
 
 [kac]: https://keepachangelog.com/en/1.1.0/
