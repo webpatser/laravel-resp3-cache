@@ -1,0 +1,22 @@
+# Composer
+vendor/
+
+# PHPUnit
+.phpunit.cache/
+.phpunit.result.cache
+
+# IDE
+.idea/
+.vscode/
+
+# macOS
+.DS_Store
+
+# Local plans (gitignored)
+PLAN.md
+CLAUDE.md
+.claude/
+
+# Backup files
+*.bak
+*~

@@ -1,0 +1,41 @@
+{
+    "name": "webpatser/laravel-resp3-cache",
+    "description": "Synchronous Redis client and Laravel cache driver backed by the ext-resp3 C parser.",
+    "type": "library",
+    "license": "MIT",
+    "keywords": ["laravel", "cache", "redis", "valkey", "resp3", "php-resp3"],
+    "require": {
+        "php": "^8.4",
+        "ext-resp3": "*",
+        "illuminate/contracts": "^11.0|^12.0|^13.0",
+        "illuminate/redis": "^11.0|^12.0|^13.0",
+        "illuminate/support": "^11.0|^12.0|^13.0"
+    },
+    "require-dev": {
+        "orchestra/testbench": "^9.0|^10.0",
+        "phpunit/phpunit": "^10.5|^11.0",
+        "predis/predis": "^2.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Resp3\\Laravel\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Resp3\\Laravel\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Resp3\\Laravel\\Resp3ServiceProvider"
+            ]
+        }
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true,
+    "config": {
+        "sort-packages": true
+    }
+}
