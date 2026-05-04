@@ -1,4 +1,4 @@
-.PHONY: help test test-unit test-feature cluster-up cluster-down cluster-test bench
+.PHONY: help test test-unit test-feature cluster-up cluster-down cluster-test sentinel-up sentinel-down sentinel-test bench
 
 EXT_RESP3 ?= /Users/christoph/Development/Github/php-resp3/modules/resp3.so
 PHP       := php -d extension=$(EXT_RESP3)
@@ -11,6 +11,9 @@ help:
 	@echo "  cluster-up        Boot the 6-node Valkey cluster on 127.0.0.1:7100-7105 (port 7000 collides with macOS AirPlay Receiver)"
 	@echo "  cluster-down      Tear it down"
 	@echo "  cluster-test      cluster-up + cluster suite + cluster-down"
+	@echo "  sentinel-up       Boot the Sentinel-managed Valkey on 127.0.0.1:6500 (master) + 26500-26502 (sentinels)"
+	@echo "  sentinel-down     Tear it down"
+	@echo "  sentinel-test     sentinel-up + sentinel suite + sentinel-down"
 	@echo "  bench             Run cache::many bench against single-node and cluster"
 
 test: test-unit test-feature
@@ -30,6 +33,16 @@ cluster-down:
 cluster-test: cluster-up
 	-$(PHP) vendor/bin/phpunit tests/Feature/ClusterTest.php tests/Feature/ClusterReplicaTest.php
 	@$(MAKE) cluster-down
+
+sentinel-up:
+	tests/cluster/sentinel-setup.sh
+
+sentinel-down:
+	tests/cluster/sentinel-teardown.sh
+
+sentinel-test: sentinel-up
+	-$(PHP) vendor/bin/phpunit tests/Feature/SentinelTest.php
+	@$(MAKE) sentinel-down
 
 bench:
 	$(PHP) bench/laravel_cache_many.php

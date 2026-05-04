@@ -154,11 +154,56 @@ connections.
 
 Cluster mode does not support pub/sub yet. Open a single-node
 `Redis::connection()` pointed at one of the cluster's master nodes for
-pub/sub, or wait for sharded pub/sub (SSUBSCRIBE) in v0.4.
+pub/sub, or wait for sharded pub/sub (SSUBSCRIBE) in v0.5.
+
+## Sentinel mode
+
+Set `'replication' => 'sentinel'` and provide the master service name
+plus a list of seed sentinels in the standard Predis-compatible config
+shape. The connector queries the sentinels for the current master,
+opens a normal data-plane connection, and re-discovers transparently
+when the connection drops or the master is demoted.
+
+```php
+'redis' => [
+    'client' => 'resp3',
+    'options' => [
+        'replication' => 'sentinel',
+        'service'     => env('REDIS_SENTINEL_SERVICE', 'mymaster'),
+        'sentinel_password' => env('REDIS_SENTINEL_PASSWORD'),
+        'password' => env('REDIS_PASSWORD'),
+        'database' => 0,
+        'timeout'  => 0.5,
+    ],
+    'default' => [
+        ['host' => env('REDIS_SENTINEL_1_HOST'), 'port' => 26379],
+        ['host' => env('REDIS_SENTINEL_2_HOST'), 'port' => 26379],
+        ['host' => env('REDIS_SENTINEL_3_HOST'), 'port' => 26379],
+    ],
+],
+```
+
+Failover is reactive: a dropped connection or a `READONLY` reply from
+a demoted master triggers a fresh `SENTINEL get-master-addr-by-name`
+query. The seed list is rotated on every failed attempt so a dead
+sentinel does not block subsequent tries. No background pub/sub on
+`+switch-master`; the next command is what notices.
+
+Read-replica routing via Sentinel is master-only in v0.4. If you need
+to spread reads, the cluster mode `cluster_read_replicas` flag is the
+existing workaround. Sharded sentinel reads land in v0.5.
+
+### Local Sentinel development
+
+```bash
+make sentinel-up      # boots 1 master + 2 replicas + 3 sentinels
+make sentinel-test    # runs the sentinel suite + tears down
+make sentinel-down    # tears down manually
+```
 
 ## Limitations
 
-- No Sentinel failover.
+- Sentinel reads from replicas not yet wired up (master-only routing).
 - Cluster pub/sub (SSUBSCRIBE) not supported.
 - No connection pooling beyond `STREAM_CLIENT_PERSISTENT`.
 - Cross-slot multi-key commands (`MGET`, `MSET`, transactions) are

@@ -9,6 +9,64 @@ minor and are called out in the entry.
 
 Nothing yet.
 
+## [0.4.0] - 2026-05-04
+
+Sentinel support. Standard Predis-compatible
+`'replication' => 'sentinel'` config now Just Works against a
+Sentinel-managed Valkey topology. Existing v0.1-v0.3 single-node,
+cluster, and pub/sub behaviour unchanged.
+
+### Added
+
+- `Resp3\Laravel\Sentinel\SentinelDiscovery`: queries seed sentinels
+  for the current master via `SENTINEL get-master-addr-by-name`.
+  Round-robins on failure so a dead seed does not block subsequent
+  tries. Throws `ConnectionException` only if no seed responds.
+- `Resp3\Laravel\Sentinel\Resp3SentinelClient` (implements
+  `Resp3ClientInterface`): wraps the discovery + a lazy data-plane
+  `Resp3Client`. On `ConnectionException` or `READONLY ...` reply
+  from a demoted master, drops the cached client, re-discovers, and
+  retries the command exactly once. Subscribe and pipeline calls
+  delegate transparently.
+- `Resp3\Laravel\Connections\Resp3SentinelConnection` extends
+  `Resp3Connection`. Inherits `command()`, `multi`/`exec`,
+  `flushdb`, etc. Overrides `newSubscribeClient()` so subscriber
+  loops also benefit from re-discovery.
+- `Resp3\Laravel\Connectors\Resp3SentinelConnector`: implements
+  `Connector`. Reads `service`, `sentinel_password`, `sentinel_timeout`
+  options plus the standard data-plane password / database / TLS
+  settings. `connectToCluster()` raises with a clear "sentinel and
+  cluster are mutually exclusive" message.
+- 6 new unit tests for `SentinelDiscovery` (master discovery, fallback
+  on dead seed, all-seeds-down, malformed reply, empty service guard).
+- 4 new unit tests for `Resp3SentinelClient` (route to discovered
+  master, ConnectionException triggers rediscovery + retry, discovery
+  failure propagates, close drops the underlying client). The
+  READONLY-on-demoted-master path is covered in the feature suite.
+- `tests/cluster/sentinel-compose.yml`: 1 master + 2 replicas + 3
+  sentinels (quorum 2) on 127.0.0.1:6500-6502 + 26500-26502.
+- `tests/cluster/sentinel-setup.sh` / `sentinel-teardown.sh` plus
+  `make sentinel-up` / `sentinel-down` / `sentinel-test` targets.
+- `tests/Feature/SentinelTest`: end-to-end Cache::* round trips
+  through the discovered master, plus a `@group failover` test that
+  kills the master container, waits for sentinel re-election, and
+  verifies the next call lands on the new master.
+
+### Changed
+
+- `Resp3\Laravel\Connectors\Resp3Connector::connect()` detects
+  `'replication' => 'sentinel'` and dispatches to the new sentinel
+  connector. Single-node behaviour without that option is unchanged.
+- `Resp3\Laravel\Sentinel\SentinelDiscovery::openSentinel()` returns
+  `Resp3ClientInterface` so unit tests can inject a stub. Same change
+  applied internally in `Resp3SentinelClient`. No public surface
+  difference.
+- README gains a Sentinel mode section between Pub/Sub and
+  Limitations. Limitations updated: "No Sentinel" replaced with
+  "Sentinel reads from replicas not yet wired up".
+
+[0.4.0]: https://github.com/webpatser/laravel-resp3-cache/releases/tag/v0.4.0
+
 ## [0.3.0] - 2026-05-04
 
 Pub/Sub support. Standard `Redis::subscribe()` and `Redis::psubscribe()`
@@ -179,7 +237,7 @@ driver backed by the [ext-resp3][php-resp3] C parser.
 - No Pub/Sub (`subscribe`, `psubscribe` throw `BadMethodCallException`).
 - No connection pooling beyond `STREAM_CLIENT_PERSISTENT`.
 
-[Unreleased]: https://github.com/webpatser/laravel-resp3-cache/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/webpatser/laravel-resp3-cache/compare/v0.4.0...HEAD
 [0.1.0]: https://github.com/webpatser/laravel-resp3-cache/releases/tag/v0.1.0
 
 [kac]: https://keepachangelog.com/en/1.1.0/

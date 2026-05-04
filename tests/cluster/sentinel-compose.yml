@@ -1,0 +1,145 @@
+# Local Sentinel-managed Valkey topology: 1 master + 2 replicas + 3
+# sentinels (quorum 2). Ports:
+#   - master  6500
+#   - replicas 6501-6502
+#   - sentinels 26500-26502
+#
+# Networking: each container maps its port to the host and the Redis
+# replica nodes announce 127.0.0.1 so the macOS host plus the sentinels
+# all see the same address. Sentinel boot is sensitive to address
+# resolution; if you change ports also update sentinel-setup.sh.
+
+services:
+  valkey-master:
+    image: valkey/valkey:8
+    container_name: r3-sentinel-master
+    ports: ["6500:6500"]
+    command: >-
+      valkey-server
+      --port 6500
+      --bind 0.0.0.0
+      --protected-mode no
+      --replica-announce-ip 127.0.0.1
+      --replica-announce-port 6500
+    healthcheck:
+      test: ["CMD", "valkey-cli", "-p", "6500", "ping"]
+      interval: 2s
+      retries: 10
+
+  valkey-replica-1:
+    image: valkey/valkey:8
+    container_name: r3-sentinel-replica-1
+    ports: ["6501:6501"]
+    depends_on:
+      valkey-master: { condition: service_healthy }
+    command: >-
+      valkey-server
+      --port 6501
+      --bind 0.0.0.0
+      --protected-mode no
+      --replicaof 127.0.0.1 6500
+      --replica-announce-ip 127.0.0.1
+      --replica-announce-port 6501
+    healthcheck:
+      test: ["CMD", "valkey-cli", "-p", "6501", "ping"]
+      interval: 2s
+      retries: 10
+    network_mode: host
+
+  valkey-replica-2:
+    image: valkey/valkey:8
+    container_name: r3-sentinel-replica-2
+    ports: ["6502:6502"]
+    depends_on:
+      valkey-master: { condition: service_healthy }
+    command: >-
+      valkey-server
+      --port 6502
+      --bind 0.0.0.0
+      --protected-mode no
+      --replicaof 127.0.0.1 6500
+      --replica-announce-ip 127.0.0.1
+      --replica-announce-port 6502
+    healthcheck:
+      test: ["CMD", "valkey-cli", "-p", "6502", "ping"]
+      interval: 2s
+      retries: 10
+    network_mode: host
+
+  sentinel-1:
+    image: valkey/valkey:8
+    container_name: r3-sentinel-1
+    ports: ["26500:26500"]
+    depends_on:
+      valkey-master: { condition: service_healthy }
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        cat > /tmp/sentinel.conf <<EOF
+        port 26500
+        bind 0.0.0.0
+        protected-mode no
+        sentinel monitor mymaster 127.0.0.1 6500 2
+        sentinel down-after-milliseconds mymaster 5000
+        sentinel failover-timeout mymaster 10000
+        sentinel announce-ip 127.0.0.1
+        sentinel announce-port 26500
+        EOF
+        exec valkey-server /tmp/sentinel.conf --sentinel
+    healthcheck:
+      test: ["CMD", "valkey-cli", "-p", "26500", "ping"]
+      interval: 2s
+      retries: 10
+    network_mode: host
+
+  sentinel-2:
+    image: valkey/valkey:8
+    container_name: r3-sentinel-2
+    ports: ["26501:26501"]
+    depends_on:
+      valkey-master: { condition: service_healthy }
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        cat > /tmp/sentinel.conf <<EOF
+        port 26501
+        bind 0.0.0.0
+        protected-mode no
+        sentinel monitor mymaster 127.0.0.1 6500 2
+        sentinel down-after-milliseconds mymaster 5000
+        sentinel failover-timeout mymaster 10000
+        sentinel announce-ip 127.0.0.1
+        sentinel announce-port 26501
+        EOF
+        exec valkey-server /tmp/sentinel.conf --sentinel
+    healthcheck:
+      test: ["CMD", "valkey-cli", "-p", "26501", "ping"]
+      interval: 2s
+      retries: 10
+    network_mode: host
+
+  sentinel-3:
+    image: valkey/valkey:8
+    container_name: r3-sentinel-3
+    ports: ["26502:26502"]
+    depends_on:
+      valkey-master: { condition: service_healthy }
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        cat > /tmp/sentinel.conf <<EOF
+        port 26502
+        bind 0.0.0.0
+        protected-mode no
+        sentinel monitor mymaster 127.0.0.1 6500 2
+        sentinel down-after-milliseconds mymaster 5000
+        sentinel failover-timeout mymaster 10000
+        sentinel announce-ip 127.0.0.1
+        sentinel announce-port 26502
+        EOF
+        exec valkey-server /tmp/sentinel.conf --sentinel
+    healthcheck:
+      test: ["CMD", "valkey-cli", "-p", "26502", "ping"]
+      interval: 2s
+      retries: 10
+    network_mode: host

@@ -15,8 +15,21 @@ use Resp3\Laravel\Connections\Resp3Connection;
  */
 final class Resp3Connector implements Connector
 {
-    public function connect(array $config, array $options): Resp3Connection
+    public function connect(array $config, array $options)
     {
+        // Sentinel topology dispatches to the dedicated sentinel connector.
+        // The Predis-compatible config shape uses the `replication` option
+        // and treats `default` (the cluster-style array we receive in
+        // $config when RedisManager normalises) as a list of seed sentinels.
+        if (($options['replication'] ?? null) === 'sentinel') {
+            // RedisManager normalises a single connection's config into one
+            // array; for sentinel we expect a list of seed addresses. Wrap a
+            // bare config in a one-element list so test setups that point at
+            // a single sentinel still work.
+            $seedList = $this->isListOfNodes($config) ? $config : [$config];
+            return (new Resp3SentinelConnector())->connect($seedList, $options);
+        }
+
         $client = new Resp3Client(
             host: (string) ($config['host'] ?? '127.0.0.1'),
             port: (int)    ($config['port'] ?? 6379),
@@ -30,6 +43,14 @@ final class Resp3Connector implements Connector
         );
 
         return new Resp3Connection($client, $config);
+    }
+
+    /** Distinguish a list of node configs from a single node config. */
+    private function isListOfNodes(array $config): bool
+    {
+        // Single node has 'host' at top level; a list has integer keys with
+        // ['host' => ..., 'port' => ...] entries.
+        return $config !== [] && isset($config[0]) && is_array($config[0]);
     }
 
     public function connectToCluster(array $config, array $clusterOptions, array $options)
