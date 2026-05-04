@@ -75,11 +75,40 @@ class Resp3Connection extends Connection
         return $this->command($method, $parameters);
     }
 
-    /** Subscriptions are not supported in v0.1; throw a clear error. */
+    /**
+     * Drive a blocking pub/sub loop on a dedicated socket so the original
+     * connection stays free for normal commands.
+     */
     public function createSubscription($channels, Closure $callback, $method = 'subscribe')
     {
-        throw new BadMethodCallException(
-            'Resp3Connection does not support pub/sub in v0.1. Use predis or phpredis for subscribers.'
+        $loop = new \Resp3\Laravel\PubSub\SubscriptionLoop(
+            $this->newSubscribeClient(),
+            is_array($channels) ? array_values($channels) : [$channels],
+            $callback,
+            $method,
+        );
+        $loop->run();
+    }
+
+    /**
+     * Build a fresh Resp3Client for a subscribe loop. Read timeout is dropped
+     * to zero so the socket blocks forever between messages.
+     */
+    private function newSubscribeClient(): \Resp3\Laravel\Client\Resp3Client
+    {
+        $cfg = $this->config;
+        $tls = (($cfg['scheme'] ?? '') === 'tls') || (bool) ($cfg['ssl'] ?? false);
+
+        return new \Resp3\Laravel\Client\Resp3Client(
+            host: (string) ($cfg['host'] ?? '127.0.0.1'),
+            port: (int)    ($cfg['port'] ?? 6379),
+            username:      $cfg['username'] ?? null,
+            password:      $cfg['password'] ?? null,
+            database: (int) ($cfg['database'] ?? 0),
+            tls: $tls,
+            timeout: 0.0,            // block indefinitely between messages
+            persistent: false,       // never share a subscribe socket
+            tlsOptions: is_array($cfg['ssl'] ?? null) ? $cfg['ssl'] : [],
         );
     }
 

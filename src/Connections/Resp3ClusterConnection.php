@@ -101,7 +101,9 @@ class Resp3ClusterConnection extends Resp3Connection
     public function createSubscription($channels, Closure $callback, $method = 'subscribe')
     {
         throw new BadMethodCallException(
-            'Resp3ClusterConnection does not support pub/sub in v0.2.'
+            'Pub/Sub is not supported on a cluster connection. Subscribe via a ' .
+            'single-node Redis::connection() pointed at one of the master nodes, ' .
+            'or wait for sharded pub/sub (SSUBSCRIBE) support in v0.4.'
         );
     }
 

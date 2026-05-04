@@ -12,7 +12,7 @@ use Resp3\RedisException;
  * parser by reading bytes until a complete top-level reply lands. No fibers,
  * no event loop, no callbacks. Drop-in for php-fpm / sync request workflows.
  */
-final class Resp3Client
+final class Resp3Client implements Resp3ClientInterface
 {
     private mixed $socket = null;
     private Parser $parser;
@@ -85,6 +85,17 @@ final class Resp3Client
         $this->parser = new Parser();
     }
 
+    /**
+     * Block on the socket until one complete reply or push frame arrives, then
+     * return it. Used by the pub/sub loop after sending SUBSCRIBE / PSUBSCRIBE
+     * to consume server-pushed messages without writing a new command.
+     */
+    public function readNext(): mixed
+    {
+        $this->ensureConnected();
+        return $this->readReply();
+    }
+
     public function __destruct()
     {
         $this->close();
@@ -107,14 +118,29 @@ final class Resp3Client
 
         $context = stream_context_create($this->tls ? ['ssl' => $this->tlsOptions] : []);
 
+        // The connect step needs a positive timeout; clamp to 5s minimum so
+        // a configured read timeout of 0 (used by subscribe loops to block
+        // forever between messages) does not also disable connect.
+        $connectTimeout = $this->timeout > 0.0 ? $this->timeout : 5.0;
+
         $errno = 0;
         $errstr = '';
-        $socket = @stream_socket_client($uri, $errno, $errstr, $this->timeout, $flags, $context);
+        $socket = @stream_socket_client($uri, $errno, $errstr, $connectTimeout, $flags, $context);
         if ($socket === false) {
             throw new ConnectionException("Connect to {$uri} failed: {$errstr} ({$errno})");
         }
 
-        stream_set_timeout($socket, (int) floor($this->timeout), (int) (($this->timeout - floor($this->timeout)) * 1_000_000));
+        // Only set a read timeout when one was requested. timeout: 0.0 means
+        // "block forever" (subscribe loop pattern); on macOS calling
+        // stream_set_timeout(socket, 0, 0) flips to immediate timeout
+        // instead of blocking, so we leave the OS default in that case.
+        if ($this->timeout > 0.0) {
+            stream_set_timeout(
+                $socket,
+                (int) floor($this->timeout),
+                (int) (($this->timeout - floor($this->timeout)) * 1_000_000),
+            );
+        }
         $this->socket = $socket;
         $this->parser = new Parser();
 
