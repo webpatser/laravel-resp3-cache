@@ -86,6 +86,97 @@ final class SentinelDiscovery
         );
     }
 
+    /**
+     * Returns the healthy replicas registered for the service. An empty list is
+     * a valid result (no replicas configured, or all of them flagged s_down /
+     * o_down) and signals the caller to fall back to master-only routing.
+     *
+     * @return list<array{host:string,port:int}>
+     * @throws ConnectionException when no seed sentinel responds at all
+     */
+    public function discoverReplicas(): array
+    {
+        $errors = [];
+        $count  = count($this->seeds);
+
+        for ($i = 0; $i < $count; $i++) {
+            $seed = $this->seeds[0];
+            try {
+                $client = $this->openSentinel($seed);
+                $reply  = $client->command('SENTINEL', 'replicas', $this->service);
+                $client->close();
+
+                if ($reply instanceof RedisException) {
+                    $errors[] = "{$seed['host']}:{$seed['port']}: " . $reply->getMessage();
+                    $this->rotateSeeds();
+                    continue;
+                }
+
+                if (!is_array($reply)) {
+                    $errors[] = "{$seed['host']}:{$seed['port']}: unexpected reply shape";
+                    $this->rotateSeeds();
+                    continue;
+                }
+
+                return $this->parseReplicas($reply);
+            } catch (ConnectionException $e) {
+                $errors[] = "{$seed['host']}:{$seed['port']}: " . $e->getMessage();
+                $this->rotateSeeds();
+            }
+        }
+
+        throw new ConnectionException(
+            "Could not query replicas for '{$this->service}' from any sentinel: " . implode('; ', $errors)
+        );
+    }
+
+    /**
+     * Parse a SENTINEL replicas reply into healthy host/port pairs.
+     *
+     * Each entry is either a flat key/value array (RESP2) or a map (RESP3);
+     * both shapes resolve to an array with string keys after parsing.
+     *
+     * @param  list<mixed>  $reply
+     * @return list<array{host:string,port:int}>
+     */
+    private function parseReplicas(array $reply): array
+    {
+        $out = [];
+        foreach ($reply as $entry) {
+            if (!is_array($entry)) continue;
+            $info = $this->normalizeReplicaInfo($entry);
+            if (!isset($info['ip'], $info['port'])) continue;
+            $flags = (string) ($info['flags'] ?? '');
+            if (str_contains($flags, 's_down') || str_contains($flags, 'o_down')) continue;
+            $out[] = ['host' => (string) $info['ip'], 'port' => (int) $info['port']];
+        }
+        return $out;
+    }
+
+    /**
+     * Convert either a flat list of alternating key/value strings or an
+     * already-keyed associative array into a single string-keyed map.
+     *
+     * @param  array<int|string, mixed>  $entry
+     * @return array<string, mixed>
+     */
+    private function normalizeReplicaInfo(array $entry): array
+    {
+        if ($entry === []) return [];
+        // Already a map (RESP3 typed reply).
+        if (array_keys($entry) !== range(0, count($entry) - 1)) {
+            $out = [];
+            foreach ($entry as $k => $v) $out[(string) $k] = $v;
+            return $out;
+        }
+        // Flat list of [k0, v0, k1, v1, ...] (RESP2 reply).
+        $out = [];
+        for ($i = 0, $n = count($entry); $i + 1 < $n; $i += 2) {
+            $out[(string) $entry[$i]] = $entry[$i + 1];
+        }
+        return $out;
+    }
+
     /** @param  array{host:string,port:int}  $seed */
     private function openSentinel(array $seed): Resp3ClientInterface
     {
