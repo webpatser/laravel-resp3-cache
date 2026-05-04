@@ -133,6 +133,14 @@ final class RecordingClient implements Resp3ClientInterface
     }
 
     public function readNext(): mixed { return array_shift($this->replies); }
+    public function pipeline(array $commands): array
+    {
+        $out = [];
+        foreach ($commands as $_) {
+            $out[] = array_shift($this->replies);
+        }
+        return $out;
+    }
     public function close(): void { $this->closed = true; }
     public function isConnected(): bool { return !$this->closed; }
 }

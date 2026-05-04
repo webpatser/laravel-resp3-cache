@@ -5,6 +5,7 @@ namespace Resp3\Laravel\Connectors;
 use Illuminate\Contracts\Redis\Connector;
 use Resp3\Laravel\Connections\Resp3SentinelConnection;
 use Resp3\Laravel\Sentinel\Resp3SentinelClient;
+use Resp3\Laravel\Sentinel\Resp3SentinelReplicaPool;
 use Resp3\Laravel\Sentinel\SentinelDiscovery;
 use RuntimeException;
 
@@ -61,18 +62,39 @@ final class Resp3SentinelConnector implements Connector
             timeout: (float) ($options['sentinel_timeout'] ?? 1.0),
         );
 
+        $tls        = ($options['scheme'] ?? '') === 'tls' || (bool) ($options['ssl'] ?? false);
+        $timeout    = (float) ($options['read_timeout'] ?? $options['timeout'] ?? 5.0);
+        $persistent = (bool) ($options['persistent'] ?? false);
+        $tlsOptions = is_array($options['ssl'] ?? null) ? $options['ssl'] : [];
+
         $client = new Resp3SentinelClient(
             discovery: $discovery,
             username: $options['username'] ?? null,
             password: $options['password'] ?? null,
             database: (int) ($options['database'] ?? 0),
-            tls: ($options['scheme'] ?? '') === 'tls' || (bool) ($options['ssl'] ?? false),
-            timeout: (float) ($options['read_timeout'] ?? $options['timeout'] ?? 5.0),
-            persistent: (bool) ($options['persistent'] ?? false),
-            tlsOptions: is_array($options['ssl'] ?? null) ? $options['ssl'] : [],
+            tls: $tls,
+            timeout: $timeout,
+            persistent: $persistent,
+            tlsOptions: $tlsOptions,
         );
 
-        return new Resp3SentinelConnection($client, $options);
+        $replicaPool = null;
+        if ((bool) ($options['sentinel_read_replicas'] ?? false)) {
+            $replicaPool = new Resp3SentinelReplicaPool(
+                discovery: $discovery,
+                clientOptions: [
+                    'username'   => $options['username'] ?? null,
+                    'password'   => $options['password'] ?? null,
+                    'database'   => (int) ($options['database'] ?? 0),
+                    'tls'        => $tls,
+                    'timeout'    => $timeout,
+                    'persistent' => $persistent,
+                    'tlsOptions' => $tlsOptions,
+                ],
+            );
+        }
+
+        return new Resp3SentinelConnection($client, $options, $replicaPool);
     }
 
     public function connectToCluster(array $config, array $clusterOptions, array $options): Resp3SentinelConnection

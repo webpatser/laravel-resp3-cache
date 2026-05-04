@@ -8,6 +8,7 @@ use Illuminate\Redis\Connections\Connection;
 use Illuminate\Redis\Events\CommandExecuted;
 use Illuminate\Redis\Events\CommandFailed;
 use Resp3\Laravel\Client\Resp3Client;
+use Resp3\Laravel\Client\Resp3ClientInterface;
 use Resp3\RedisException;
 use Throwable;
 
@@ -22,10 +23,10 @@ use Throwable;
 class Resp3Connection extends Connection
 {
     /**
-     * @param  Resp3Client  $client
-     * @param  array        $config
+     * @param  Resp3ClientInterface  $client  Real socket client or a Sentinel-aware wrapper.
+     * @param  array                 $config
      */
-    public function __construct(Resp3Client $client, array $config = [])
+    public function __construct(Resp3ClientInterface $client, array $config = [])
     {
         $this->client = $client;
         $this->config = $config;

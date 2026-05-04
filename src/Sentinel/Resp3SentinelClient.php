@@ -56,6 +56,16 @@ final class Resp3SentinelClient implements Resp3ClientInterface
         return $this->client()->readNext();
     }
 
+    public function pipeline(array $commands): array
+    {
+        try {
+            return $this->client()->pipeline($commands);
+        } catch (ConnectionException) {
+            $this->reset();
+            return $this->client()->pipeline($commands);
+        }
+    }
+
     public function close(): void
     {
         $this->current?->close();

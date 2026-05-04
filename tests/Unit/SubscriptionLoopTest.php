@@ -128,4 +128,9 @@ final class StubClient implements Resp3ClientInterface
     {
         return !$this->closed;
     }
+
+    public function pipeline(array $commands): array
+    {
+        return [];
+    }
 }

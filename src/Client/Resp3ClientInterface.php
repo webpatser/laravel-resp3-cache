@@ -15,6 +15,14 @@ interface Resp3ClientInterface
     /** Block on the socket until one complete reply or push frame arrives. */
     public function readNext(): mixed;
 
+    /**
+     * Send a batch of commands in one round trip and return the replies.
+     *
+     * @param  list<list<string>>  $commands  Each inner list: [name, ...args]
+     * @return list<mixed>
+     */
+    public function pipeline(array $commands): array;
+
     public function close(): void;
 
     public function isConnected(): bool;

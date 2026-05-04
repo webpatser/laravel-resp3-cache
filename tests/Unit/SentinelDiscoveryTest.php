@@ -121,4 +121,5 @@ final class FakeSentinel implements \Resp3\Laravel\Client\Resp3ClientInterface
     public function close(): void {}
     public function isConnected(): bool { return !$this->throwsOnConnect; }
     public function readNext(): mixed { return null; }
+    public function pipeline(array $commands): array { return []; }
 }
