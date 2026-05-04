@@ -48,7 +48,7 @@ final class ClusterPubSubTest extends TestCase
     public function test_subscribe_on_cluster_throws_with_hint(): void
     {
         $this->expectException(BadMethodCallException::class);
-        $this->expectExceptionMessageMatches('/single-node/i');
+        $this->expectExceptionMessageMatches('/ssubscribe|single-node/i');
 
         Redis::connection()->subscribe(['anything'], fn () => null);
     }
@@ -56,7 +56,7 @@ final class ClusterPubSubTest extends TestCase
     public function test_psubscribe_on_cluster_throws_with_hint(): void
     {
         $this->expectException(BadMethodCallException::class);
-        $this->expectExceptionMessageMatches('/single-node/i');
+        $this->expectExceptionMessageMatches('/ssubscribe|single-node/i');
 
         Redis::connection()->psubscribe(['p.*'], fn () => null);
     }

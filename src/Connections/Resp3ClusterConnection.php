@@ -6,8 +6,10 @@ use BadMethodCallException;
 use Closure;
 use Illuminate\Redis\Events\CommandExecuted;
 use Illuminate\Redis\Events\CommandFailed;
+use Resp3\Laravel\Client\Resp3Client;
 use Resp3\Laravel\Cluster\CRC16;
 use Resp3\Laravel\Cluster\Resp3ClusterRouter;
+use Resp3\Laravel\PubSub\SubscriptionLoop;
 use RuntimeException;
 use Throwable;
 
@@ -101,10 +103,35 @@ class Resp3ClusterConnection extends Resp3Connection
     public function createSubscription($channels, Closure $callback, $method = 'subscribe')
     {
         throw new BadMethodCallException(
-            'Pub/Sub is not supported on a cluster connection. Subscribe via a ' .
-            'single-node Redis::connection() pointed at one of the master nodes, ' .
-            'or wait for sharded pub/sub (SSUBSCRIBE) support in v0.4.'
+            'Global Pub/Sub (SUBSCRIBE / PSUBSCRIBE) is not supported on a cluster ' .
+            'connection. For per-shard delivery, use Redis::connection()->ssubscribe(' .
+            "['{tag}.channel'], \$callback) (sharded pub/sub via SSUBSCRIBE). For " .
+            'global broadcast semantics, open a single-node Redis::connection() ' .
+            'pointed at one of the cluster master nodes.'
         );
+    }
+
+    /**
+     * Sharded subscribe (SSUBSCRIBE) on the cluster master that owns the
+     * channel's slot. All channels in a single call must hash to the same
+     * slot; use {hash tag} syntax to colocate them. Writes a dedicated
+     * subscriber socket against that master and runs the SubscriptionLoop
+     * until the callback returns false, a signal arrives, or the socket
+     * drops.
+     *
+     * @param  list<string>  $channels
+     */
+    public function ssubscribe(array $channels, Closure $callback): void
+    {
+        if ($channels === []) {
+            throw new \InvalidArgumentException('At least one channel is required');
+        }
+
+        $hashKey = $this->validateSameSlotChannels($channels);
+        $addr    = $this->router->subscriberAddrForChannel($hashKey);
+
+        $client = $this->newSubscribeClientFor($addr);
+        (new SubscriptionLoop($client, array_values($channels), $callback, 'ssubscribe'))->run();
     }
 
     // ------------------------------------------------------------------ helpers
@@ -121,6 +148,53 @@ class Resp3ClusterConnection extends Resp3Connection
         $elapsed = round((microtime(true) - $start) * 1000, 2);
         $this->events?->dispatch(new CommandExecuted($method, $parameters, $elapsed, $this));
         return $result;
+    }
+
+    /**
+     * Verify every channel hashes to the same slot. Returns the first channel
+     * (used as the slot's hash key for routing). Throws RuntimeException with
+     * a CROSSSLOT-style hint when the channels disagree.
+     *
+     * @param  list<string>  $channels
+     */
+    private function validateSameSlotChannels(array $channels): string
+    {
+        $first = (string) $channels[0];
+        $slot  = CRC16::slot($first);
+        for ($i = 1, $n = count($channels); $i < $n; $i++) {
+            $other = (string) $channels[$i];
+            if (CRC16::slot($other) !== $slot) {
+                throw new RuntimeException(
+                    "CROSSSLOT channels in ssubscribe: '{$first}' and '{$other}' " .
+                    "hash to different slots. Use a {hash tag} to colocate them."
+                );
+            }
+        }
+        return $first;
+    }
+
+    /**
+     * Build a fresh subscriber Resp3Client against a specific cluster master
+     * address. Mirrors Resp3Connection::newSubscribeClient but parses the
+     * "host:port" picked by the router and inherits cluster-wide auth/tls
+     * via Resp3ClusterRouter::getDataPlaneOptions().
+     */
+    private function newSubscribeClientFor(string $addr): Resp3Client
+    {
+        [$host, $port] = explode(':', $addr, 2);
+        $opts = $this->router->getDataPlaneOptions();
+
+        return new Resp3Client(
+            host:       $host,
+            port:       (int) $port,
+            username:   $opts['username']   ?? null,
+            password:   $opts['password']   ?? null,
+            database:   0,                                  // pub/sub is database-agnostic
+            tls:        (bool) ($opts['tls'] ?? false),
+            timeout:    0.0,                                // block forever between messages
+            persistent: false,                              // never share a subscribe socket
+            tlsOptions: is_array($opts['tlsOptions'] ?? null) ? $opts['tlsOptions'] : [],
+        );
     }
 
     private function trackMultiHashKey(string $command, array $args): void
