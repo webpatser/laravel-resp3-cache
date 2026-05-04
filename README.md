@@ -189,9 +189,35 @@ query. The seed list is rotated on every failed attempt so a dead
 sentinel does not block subsequent tries. No background pub/sub on
 `+switch-master`; the next command is what notices.
 
-Read-replica routing via Sentinel is master-only in v0.4. If you need
-to spread reads, the cluster mode `cluster_read_replicas` flag is the
-existing workaround. Sharded sentinel reads land in v0.5.
+### Replica reads
+
+Set `'sentinel_read_replicas' => true` to route read commands to
+replicas (matches the `cluster_read_replicas` flag in cluster mode).
+Writes always go to the master. The replica list is discovered via
+`SENTINEL replicas <service>`; replicas flagged `s_down` or `o_down`
+are filtered out. The pool refreshes on exhaustion, and any read that
+cannot find a healthy replica falls back silently to the master.
+
+```php
+'options' => [
+    'replication' => 'sentinel',
+    'service'     => env('REDIS_SENTINEL_SERVICE', 'mymaster'),
+    'sentinel_read_replicas' => env('REDIS_SENTINEL_READ_REPLICAS', false),
+    // ...
+],
+```
+
+A few caveats:
+
+- Random selection only in v0.5; round-robin and weighted strategies
+  land later.
+- Read-after-write on the same connection can return the previous
+  value because of normal replication lag. If you need strict
+  read-after-write, force the read through the master by reusing the
+  Cache key right after writing on a non-replica path or by toggling
+  the flag off on that connection.
+- Pipelines and EVAL/EVALSHA always route to the master because their
+  read/write profile is opaque to the classifier.
 
 ### Local Sentinel development
 
@@ -203,7 +229,8 @@ make sentinel-down    # tears down manually
 
 ## Limitations
 
-- Sentinel reads from replicas not yet wired up (master-only routing).
+- Sentinel replica reads use random selection only; round-robin and
+  weighted strategies land later.
 - Cluster pub/sub (SSUBSCRIBE) not supported.
 - No connection pooling beyond `STREAM_CLIENT_PERSISTENT`.
 - Cross-slot multi-key commands (`MGET`, `MSET`, transactions) are

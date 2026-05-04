@@ -9,6 +9,67 @@ minor and are called out in the entry.
 
 Nothing yet.
 
+## [0.5.0] - 2026-05-04
+
+Sentinel replica reads. Set `'sentinel_read_replicas' => true` on the
+sentinel config and read commands route to a random healthy replica
+discovered via `SENTINEL replicas`. Writes, MULTI-buffered commands, and
+pool-exhausted reads continue to land on the master. Default is `false`,
+so v0.4 behaviour is unchanged for users who do not opt in.
+
+### Added
+
+- `Resp3\Laravel\Sentinel\SentinelDiscovery::discoverReplicas()`: queries
+  seed sentinels for the live replica list. Filters out replicas flagged
+  `s_down` or `o_down`. Returns an empty list (not an exception) when no
+  healthy replicas are reported, so the connection layer can fall back
+  to master-only routing without surfacing an error.
+- `Resp3\Laravel\Sentinel\Resp3SentinelReplicaPool`: lazy connection pool
+  to discovered replicas. Picks one randomly per command (mirrors the
+  cluster mode `cluster_read_replicas` flag), sends `READONLY` one-shot
+  per fresh connection, and refreshes the replica list when the pool
+  exhausts. Throws `NoReplicasAvailableException` if a refresh still
+  yields nothing.
+- `Resp3\Laravel\Sentinel\NoReplicasAvailableException`: marker exception
+  caught by the connection layer to trigger the silent master fallback.
+- `Resp3\Laravel\Connections\Resp3SentinelConnection::command()` override
+  classifies via `CommandClassifier::isReadOnly()` and routes reads to
+  the replica pool when one is configured. MULTI-buffered commands and
+  writes always go to the master.
+- `sentinel_read_replicas` option on `Resp3SentinelConnector`. When true,
+  the connector instantiates a replica pool with the same data-plane
+  options as the master client and hands it to the connection.
+- 6 new unit tests for `SentinelDiscovery::discoverReplicas` (healthy
+  list, s_down / o_down filtering, empty reply, seed fallback, all-seeds
+  dead, RESP3 map shape).
+- 7 new unit tests for `Resp3SentinelReplicaPool` (read routes, retry on
+  socket failure, refresh on pool exhaustion, throws when refresh empty,
+  READONLY-once invariant, close drops clients, knownReplicas snapshot).
+- 5 new unit tests for `Resp3SentinelConnectionRoutingTest` (read goes
+  to pool, write to master, exhaustion falls back, no-pool acts like
+  v0.4, MULTI keeps reads on master).
+- `tests/Feature/SentinelReplicaReadsTest`: end-to-end test against the
+  local sentinel docker compose. Includes a MONITOR-based assertion that
+  reads actually land on a replica, plus a replicas-down fallback test.
+
+### Changed
+
+- `Resp3\Laravel\Client\Resp3ClientInterface` gains `pipeline(array)` so
+  Sentinel-managed connections can route MULTI/EXEC through the wrapper
+  without losing the existing pipeline path. Test stubs updated.
+- `Resp3\Laravel\Connections\Resp3Connection` constructor now types its
+  client argument as `Resp3ClientInterface` (was concretely `Resp3Client`).
+  v0.4 had a latent runtime TypeError when `Resp3SentinelConnection`
+  instantiated the parent; that path was masked by the docker-skip in
+  the feature suite. No change for single-node or cluster users.
+- `Resp3\Laravel\Sentinel\Resp3SentinelClient` gains `pipeline()` with
+  the same retry-on-ConnectionException semantics as `command()`.
+- README gains a "Replica reads" subsection under Sentinel mode.
+  Limitations updated: replica routing is now wired up; the remaining
+  caveat is that v0.5 only supports random selection.
+
+[0.5.0]: https://github.com/webpatser/laravel-resp3-cache/releases/tag/v0.5.0
+
 ## [0.4.0] - 2026-05-04
 
 Sentinel support. Standard Predis-compatible
@@ -237,7 +298,7 @@ driver backed by the [ext-resp3][php-resp3] C parser.
 - No Pub/Sub (`subscribe`, `psubscribe` throw `BadMethodCallException`).
 - No connection pooling beyond `STREAM_CLIENT_PERSISTENT`.
 
-[Unreleased]: https://github.com/webpatser/laravel-resp3-cache/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/webpatser/laravel-resp3-cache/compare/v0.5.0...HEAD
 [0.1.0]: https://github.com/webpatser/laravel-resp3-cache/releases/tag/v0.1.0
 
 [kac]: https://keepachangelog.com/en/1.1.0/
