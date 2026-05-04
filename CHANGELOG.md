@@ -9,6 +9,70 @@ minor and are called out in the entry.
 
 Nothing yet.
 
+## [0.2.0] - 2026-05-04
+
+Redis Cluster mode. Existing Laravel apps drop in by setting
+`'client' => 'resp3'` on the standard `clusters` config shape; no API
+changes for v0.1 single-node users.
+
+### Added
+
+- `Resp3\Laravel\Cluster\CRC16`: XMODEM polynomial CRC + hash tag
+  extraction. Slot calculation matches phpredis and Predis bit-for-bit.
+- `Resp3\Laravel\Cluster\RedirectionParser`: parses `MOVED` and `ASK`
+  error messages, IPv4 and bracketed IPv6 hosts.
+- `Resp3\Laravel\Cluster\Resp3ClusterRouter`: routes commands by slot
+  across multiple `Resp3Client` instances. Lazy topology via
+  `CLUSTER SHARDS` (Redis 7+) with `CLUSTER SLOTS` fallback. Cached
+  slot map refreshed on MOVED, one-shot ASK redirects without map
+  updates. 5x retry with exponential backoff capped at 200ms.
+- `Resp3\Laravel\Cluster\CommandClassifier`: read-only command set used
+  by replica routing.
+- `Resp3\Laravel\Connections\Resp3ClusterConnection`: extends the
+  single-node Connection. `flushdb`/`flushall` broadcast to all
+  masters; `multi`/`exec` validate all queued commands hash to the
+  same slot before sending.
+- `Resp3\Laravel\Connectors\Resp3ClusterConnector`: implements
+  `Illuminate\Contracts\Redis\Connector::connectToCluster()`.
+  `Resp3Connector::connectToCluster()` now delegates here instead of
+  throwing `RuntimeException`.
+- `cluster_read_replicas` cluster option: when true, reads route to a
+  random replica for the slot. Fresh replica connections get a
+  one-shot `READONLY`.
+- `tests/cluster/docker-compose.yml`: 6-node Valkey 8 cluster (3
+  masters + 3 replicas) on 127.0.0.1:7100-7105 with cluster bus on
+  17100-17105. `make cluster-up` / `cluster-down` / `cluster-test`
+  targets in the new Makefile.
+- `bench/cluster_cache_many.php` measuring `Cache::many()` with hash
+  tag-grouped keys against the cluster.
+- CI `cluster-test` job that boots the 6-node cluster on the GitHub
+  runner and runs the cluster suite on PHP 8.4 and 8.5.
+
+### Changed
+
+- `Resp3\Laravel\Connectors\Resp3Connector::connectToCluster()` now
+  delegates to `Resp3ClusterConnector` instead of throwing. Single-node
+  callers see no behaviour change.
+- README gains a "Cluster mode" section with config example, hash tag
+  guidance, replica routing, and local cluster setup notes.
+
+### Removed
+
+- "No Redis Cluster" from the Limitations list. Sentinel and Pub/Sub
+  remain out of scope.
+
+### Compatibility notes
+
+- v0.1.x single-node behaviour is unchanged.
+- Cross-slot multi-key commands now raise a `RuntimeException` with
+  "CROSSSLOT" in the message instead of silently failing on the
+  server. Use `{hash tag}` syntax to colocate keys.
+- Local cluster boot via Docker compose works on Linux; macOS Docker
+  Desktop sometimes fails the cluster-bus handshake when nodes
+  announce 127.0.0.1. CI is the source of truth for cluster tests.
+
+[0.2.0]: https://github.com/webpatser/laravel-resp3-cache/releases/tag/v0.2.0
+
 ## [0.1.0] - 2026-05-04
 
 First public release. Drop-in synchronous Redis client and Laravel cache
@@ -55,7 +119,7 @@ driver backed by the [ext-resp3][php-resp3] C parser.
 - No Pub/Sub (`subscribe`, `psubscribe` throw `BadMethodCallException`).
 - No connection pooling beyond `STREAM_CLIENT_PERSISTENT`.
 
-[Unreleased]: https://github.com/webpatser/laravel-resp3-cache/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/webpatser/laravel-resp3-cache/compare/v0.2.0...HEAD
 [0.1.0]: https://github.com/webpatser/laravel-resp3-cache/releases/tag/v0.1.0
 
 [kac]: https://keepachangelog.com/en/1.1.0/

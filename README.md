@@ -58,13 +58,82 @@ round trip latency, so the parser swap matters less there.
   multi/exec, scan, flushdb, incr/decr/expire).
 - Standard `Cache::*` API works through the existing `redis` driver.
 
+## Cluster mode
+
+Set `'cluster' => 'redis'` and provide a `clusters` block — same shape
+as the standard Laravel cluster config for phpredis or predis. The
+package's connector picks it up via `connectToCluster()` and routes
+commands by slot across the cluster.
+
+```php
+'redis' => [
+    'client' => 'resp3',
+    'options' => [
+        'cluster' => 'redis',
+        'prefix'  => env('CACHE_PREFIX', 'app:'),
+    ],
+    'clusters' => [
+        'default' => [
+            ['host' => env('REDIS_HOST', '127.0.0.1'), 'port' => 6379],
+            ['host' => env('REDIS_HOST_2', '127.0.0.1'), 'port' => 6380],
+            ['host' => env('REDIS_HOST_3', '127.0.0.1'), 'port' => 6381],
+        ],
+        'options' => [
+            'timeout' => 2,
+            'cluster_read_replicas' => env('REDIS_CLUSTER_READ_REPLICAS', false),
+        ],
+    ],
+],
+```
+
+Topology comes from `CLUSTER SHARDS` (Redis 7+) with `CLUSTER SLOTS`
+fallback. The slot map is loaded lazily on the first command and
+refreshed on `MOVED`. `ASK` redirects send `ASKING` then the original
+command without touching the cached map. Failed nodes drop out of the
+pool with up to 5 retries (exponential backoff capped at 200ms).
+
+`'cluster_read_replicas' => true` routes read commands (`GET`, `MGET`,
+`HGET`, `HGETALL`, etc) to a random replica for the slot. Writes
+always go to the master. Fresh replica connections get a one-shot
+`READONLY` so they accept reads.
+
+### Hash tags for multi-key commands
+
+Redis cluster requires all keys in one command (`MGET`, `MSET`, `DEL k1
+k2`) to live in the same slot. Use `{tag}` syntax to colocate keys:
+
+```php
+Cache::put('{user:42}.profile', $profile);
+Cache::put('{user:42}.cart',    $cart);
+Cache::many(['{user:42}.profile', '{user:42}.cart']);  // one round trip
+```
+
+Without the hash tag the keys land on different nodes and `MGET` raises
+`CROSSSLOT keys in request don't hash to the same slot`. Same rule
+applies inside `MULTI`/`EXEC`.
+
+`Cache::flush()` and similar broadcast operations iterate every master.
+
+### Local cluster development
+
+```bash
+make cluster-up      # boots 6-node Valkey cluster on 127.0.0.1:7100-7105
+make cluster-test    # runs the cluster suite + tears it down
+make cluster-down    # tears it down manually
+```
+
+Local cluster boot works on Linux. Docker Desktop on macOS sometimes
+fails the cluster-bus handshake when nodes announce 127.0.0.1; in that
+case rely on CI for the cluster suite.
+
 ## Limitations
 
-- No Redis Cluster yet. Single-node Redis or Valkey only.
 - No Sentinel failover.
 - No Pub/Sub (Laravel cache does not use it; subscribe support comes if
   there is demand).
 - No connection pooling beyond `STREAM_CLIENT_PERSISTENT`.
+- Cross-slot multi-key commands (`MGET`, `MSET`, transactions) are
+  rejected; use hash tags to colocate keys.
 
 ## Compatibility
 

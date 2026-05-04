@@ -5,7 +5,6 @@ namespace Resp3\Laravel\Connectors;
 use Illuminate\Contracts\Redis\Connector;
 use Resp3\Laravel\Client\Resp3Client;
 use Resp3\Laravel\Connections\Resp3Connection;
-use RuntimeException;
 
 /**
  * Laravel Redis connector that builds a Resp3Connection.
@@ -33,10 +32,10 @@ final class Resp3Connector implements Connector
         return new Resp3Connection($client, $config);
     }
 
-    public function connectToCluster(array $config, array $clusterOptions, array $options): Resp3Connection
+    public function connectToCluster(array $config, array $clusterOptions, array $options)
     {
-        throw new RuntimeException(
-            'Resp3 client does not support Redis Cluster yet. Use phpredis or predis for cluster connections.'
-        );
+        // Delegate to the dedicated cluster connector. Laravel's RedisManager
+        // resolves a single connector per client name, so we route here.
+        return (new Resp3ClusterConnector())->connectToCluster($config, $clusterOptions, $options);
     }
 }
