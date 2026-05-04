@@ -27,7 +27,7 @@ final class SubscriptionLoop
         private readonly Closure $callback,
         private readonly string $method,
     ) {
-        if (!in_array(strtolower($method), ['subscribe', 'psubscribe'], true)) {
+        if (!in_array(strtolower($method), ['subscribe', 'psubscribe', 'ssubscribe'], true)) {
             throw new \InvalidArgumentException("Unknown subscribe method: {$method}");
         }
         if ($channels === []) {
@@ -53,8 +53,8 @@ final class SubscriptionLoop
 
                 $kind = is_string($payload[0] ?? null) ? strtolower($payload[0]) : null;
 
-                if ($kind === 'message') {
-                    // [message, channel, payload]
+                if ($kind === 'message' || $kind === 'smessage') {
+                    // [message|smessage, channel, payload]
                     $result = ($this->callback)($payload[2] ?? '', $payload[1] ?? '');
                     if ($result === false) break;
                 } elseif ($kind === 'pmessage') {
@@ -115,7 +115,11 @@ final class SubscriptionLoop
     private function cleanup(): void
     {
         try {
-            $unsub = strtolower($this->method) === 'subscribe' ? 'UNSUBSCRIBE' : 'PUNSUBSCRIBE';
+            $unsub = match (strtolower($this->method)) {
+                'subscribe'  => 'UNSUBSCRIBE',
+                'psubscribe' => 'PUNSUBSCRIBE',
+                'ssubscribe' => 'SUNSUBSCRIBE',
+            };
             $this->client->command($unsub);
         } catch (\Throwable) {
             // Socket may already be dead; we are tearing down anyway.

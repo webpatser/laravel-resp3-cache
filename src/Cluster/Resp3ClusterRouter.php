@@ -147,6 +147,36 @@ final class Resp3ClusterRouter
         $this->readonlySent = [];
     }
 
+    /**
+     * Resolve the master "host:port" that owns the slot for a sharded pub/sub
+     * channel. Channels hash with CRC16 exactly like keys, so {tag} syntax
+     * colocates them on the same shard.
+     */
+    public function subscriberAddrForChannel(string $channel): string
+    {
+        $slot = CRC16::slot($channel);
+        return $this->pickAddrForSlot($slot, isRead: false);
+    }
+
+    /**
+     * Snapshot of the data-plane connection options the router was built with.
+     * Used by Resp3ClusterConnection to spin up a dedicated subscriber socket
+     * on a chosen master without duplicating constructor wiring.
+     *
+     * @return array{username:?string,password:?string,tls:bool,timeout:float,persistent:bool,tlsOptions:array}
+     */
+    public function getDataPlaneOptions(): array
+    {
+        return [
+            'username'   => $this->username,
+            'password'   => $this->password,
+            'tls'        => $this->tls,
+            'timeout'    => $this->timeout,
+            'persistent' => $this->persistent,
+            'tlsOptions' => $this->tlsOptions,
+        ];
+    }
+
     // ------------------------------------------------------------------ topology
 
     private function ensureTopology(): void
@@ -338,6 +368,7 @@ final class Resp3ClusterRouter
             'EVAL','EVALSHA' => count($args) >= 2
                 ? array_slice($args, 2, (int) $args[1])
                 : [],
+            'SPUBLISH' => $args === [] ? [] : [$args[0]],
             default => [],
         };
     }
