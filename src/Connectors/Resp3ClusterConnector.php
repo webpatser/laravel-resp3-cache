@@ -39,7 +39,7 @@ final class Resp3ClusterConnector implements Connector
             seedNodes: $seedNodes,
             username:      $merged['username'] ?? $config[0]['username'] ?? null,
             password:      $merged['password'] ?? $config[0]['password'] ?? null,
-            tls:      (bool) ($merged['scheme'] ?? '') === 'tls' || ($merged['ssl'] ?? false),
+            tls:      ($merged['scheme'] ?? '') === 'tls' || (bool) ($merged['ssl'] ?? false),
             timeout:  (float) ($merged['read_timeout'] ?? $merged['timeout'] ?? 5.0),
             persistent: (bool) ($merged['persistent'] ?? false),
             tlsOptions: $merged['ssl'] ?? [],

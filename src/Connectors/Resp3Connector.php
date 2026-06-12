@@ -36,7 +36,7 @@ final class Resp3Connector implements Connector
             username:      $config['username'] ?? null,
             password:      $config['password'] ?? null,
             database: (int) ($config['database'] ?? 0),
-            tls:      (bool) ($config['scheme'] ?? '') === 'tls' || ($config['ssl'] ?? false),
+            tls:      ($config['scheme'] ?? '') === 'tls' || (bool) ($config['ssl'] ?? false),
             timeout:  (float) ($options['read_timeout'] ?? $options['timeout'] ?? 5.0),
             persistent: (bool) ($options['persistent'] ?? false),
             tlsOptions: $config['ssl'] ?? [],
