@@ -9,6 +9,17 @@ minor and are called out in the entry.
 
 Nothing yet.
 
+## [0.6.1] - 2026-08-21
+
+### Fixed
+
+- Operator precedence bug in `Resp3Connector` and `Resp3ClusterConnector`
+  that prevented `scheme=tls` from actually enabling TLS.
+
+### Changed
+
+- Updated Laravel/Symfony dev dependencies to patch the May 2026 CVEs.
+
 ## [0.6.0] - 2026-05-04
 
 Sharded pub/sub on cluster mode. `Redis::connection()->ssubscribe()` and
@@ -353,7 +364,8 @@ driver backed by the [ext-resp3][php-resp3] C parser.
 - No Pub/Sub (`subscribe`, `psubscribe` throw `BadMethodCallException`).
 - No connection pooling beyond `STREAM_CLIENT_PERSISTENT`.
 
-[Unreleased]: https://github.com/webpatser/laravel-resp3-cache/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/webpatser/laravel-resp3-cache/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/webpatser/laravel-resp3-cache/compare/v0.6.0...v0.6.1
 [0.1.0]: https://github.com/webpatser/laravel-resp3-cache/releases/tag/v0.1.0
 
 [kac]: https://keepachangelog.com/en/1.1.0/
