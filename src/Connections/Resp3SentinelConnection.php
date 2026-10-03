@@ -100,7 +100,9 @@ class Resp3SentinelConnection extends Resp3Connection
         $start = microtime(true);
 
         try {
-            $result = $this->replicaPool->command($upper, ...$args);
+            // Same error policy as the master path: a replica error reply
+            // (WRONGTYPE, LOADING, MASTERDOWN, ...) throws ServerException.
+            $result = $this->throwIfError($this->replicaPool->command($upper, ...$args));
         } catch (\Throwable $e) {
             $this->events?->dispatch(new \Illuminate\Redis\Events\CommandFailed($upper, $parameters, $e, $this));
             throw $e;

@@ -9,6 +9,8 @@ use Illuminate\Redis\Events\CommandExecuted;
 use Illuminate\Redis\Events\CommandFailed;
 use Resp3\Laravel\Client\Resp3Client;
 use Resp3\Laravel\Client\Resp3ClientInterface;
+use Resp3\Laravel\Client\ServerCapabilities;
+use Resp3\Laravel\Client\ServerException;
 use Resp3\RedisException;
 use Throwable;
 
@@ -43,6 +45,11 @@ class Resp3Connection extends Connection
      * Replace the parent's `$this->client->{$method}(...)` dispatch with our
      * explicit `Resp3Client::command()` call. Keep CommandExecuted /
      * CommandFailed events firing so userland listeners still see traffic.
+     *
+     * An error reply is thrown as ServerException (prefix WRONGTYPE, NOAUTH,
+     * ...). Inside MULTI the command is buffered and `$this` is returned.
+     *
+     * @throws ServerException
      */
     public function command($method, array $parameters = [])
     {
@@ -58,7 +65,7 @@ class Resp3Connection extends Connection
         $start = microtime(true);
 
         try {
-            $result = $this->client->command($upper, ...$args);
+            $result = $this->throwIfError($this->client->command($upper, ...$args));
         } catch (Throwable $e) {
             $this->events?->dispatch(new CommandFailed($method, $parameters, $e, $this));
             throw $e;
@@ -113,6 +120,12 @@ class Resp3Connection extends Connection
         );
     }
 
+    /** Server version and feature gates detected from the HELLO handshake. */
+    public function capabilities(): ServerCapabilities
+    {
+        return $this->client->capabilities();
+    }
+
     // ------------------------------------------------------------------ explicit Redis API
 
     public function get($key)
@@ -127,6 +140,11 @@ class Resp3Connection extends Connection
         return is_array($result) ? $result : [];
     }
 
+    /**
+     * Returns true on OK, false when an NX/XX condition was not met. Inside
+     * MULTI the command is queued and true is returned; the real outcome is
+     * in the array exec() returns.
+     */
     public function set($key, $value, $expireResolution = null, $expireTTL = null, $flag = null)
     {
         $args = [$key, (string) $value];
@@ -138,20 +156,24 @@ class Resp3Connection extends Connection
             $args[] = strtoupper($flag);               // NX or XX
         }
         $reply = $this->command('set', $args);
-        return $reply === 'OK';
+        return $reply === $this || $reply === 'OK';
     }
 
+    /** Same MULTI contract as set(): queued commands return true. */
     public function setex($key, $ttl, $value)
     {
         $reply = $this->command('setex', [$key, (string) $ttl, (string) $value]);
-        return $reply === 'OK';
+        return $reply === $this || $reply === 'OK';
     }
 
+    /** Returns 1 or 0; inside MULTI `$this` (the reply is in exec()). */
     public function setnx($key, $value)
     {
-        return (int) $this->command('setnx', [$key, (string) $value]);
+        $reply = $this->command('setnx', [$key, (string) $value]);
+        return $reply === $this ? $this : (int) $reply;
     }
 
+    /** Returns the number of deleted keys; inside MULTI `$this`. */
     public function del(...$keys)
     {
         // Accept either del('a','b') or del(['a','b']).
@@ -159,7 +181,8 @@ class Resp3Connection extends Connection
             $keys = $keys[0];
         }
         if ($keys === []) return 0;
-        return (int) $this->command('del', $keys);
+        $reply = $this->command('del', $keys);
+        return $reply === $this ? $this : (int) $reply;
     }
 
     public function eval($script, $numkeys, ...$arguments)
@@ -178,25 +201,32 @@ class Resp3Connection extends Connection
         return $this->command('multi', []);
     }
 
+    /**
+     * Run the buffered transaction.
+     *
+     * Returns the EXEC array as the server sent it: one reply per queued
+     * command, where a command that failed at run time (WRONGTYPE, ...) is a
+     * Resp3\RedisException element rather than a thrown exception, matching
+     * Redis semantics where the other commands still ran. A queue-time error
+     * (unknown command, wrong arity) aborts the whole transaction and throws
+     * ServerException with prefix EXECABORT.
+     *
+     * @return list<mixed>
+     * @throws ServerException
+     */
     public function exec()
     {
         $buffered = $this->multiBuffer ?? [];
         $this->multiBuffer = null;
 
-        // Send queued commands now (server has acknowledged each individually
-        // with +QUEUED on the round trips above; we collected the ack via
-        // parent::command). Actually under Resp3Client we have not sent the
-        // queued commands yet — `command()` returned early. So we send them
-        // now as a pipeline plus the trailing EXEC.
+        // MULTI already went out from multi(); the buffered commands have not.
+        // Send them now as one pipeline with the trailing EXEC. Each queued
+        // command replies +QUEUED (or a queue-time error), EXEC replies last.
         if ($buffered !== []) {
-            $payload = [];
-            foreach ($buffered as $cmd) {
-                $payload[] = $cmd;
-            }
-            $payload[] = ['EXEC'];
-            $replies = $this->client->pipeline($payload);
-            // The last reply is the EXEC result (an array of per-command replies).
-            return end($replies);
+            $replies = $this->client->pipeline([...$buffered, ['EXEC']]);
+            $execReply = array_pop($replies);
+
+            return $this->transactionResult($replies, $execReply);
         }
 
         return $this->command('exec', []);
@@ -210,8 +240,51 @@ class Resp3Connection extends Connection
 
     // ------------------------------------------------------------------ helpers
 
+    /**
+     * Throw an error reply as ServerException, pass anything else through.
+     *
+     * @throws ServerException
+     */
+    protected function throwIfError(mixed $reply): mixed
+    {
+        if ($reply instanceof RedisException) {
+            throw new ServerException($reply);
+        }
+        return $reply;
+    }
+
+    /**
+     * Resolve a transaction from the replies to the commands sent before
+     * EXEC and the EXEC reply itself. Any error before EXEC, or an error
+     * reply to EXEC (EXECABORT), throws; the queue-time error is chained as
+     * the previous exception. Nested per-command errors in the EXEC array
+     * are returned as is.
+     *
+     * @param  list<mixed>  $queuedReplies
+     * @throws ServerException
+     */
+    protected function transactionResult(array $queuedReplies, mixed $execReply): mixed
+    {
+        $queueError = null;
+        foreach ($queuedReplies as $reply) {
+            if ($reply instanceof RedisException) {
+                $queueError = new ServerException($reply);
+                break;
+            }
+        }
+
+        if ($execReply instanceof RedisException) {
+            throw new ServerException($execReply, $queueError);
+        }
+        if ($queueError !== null) {
+            throw $queueError;
+        }
+
+        return $execReply;
+    }
+
     /** RedisStore sometimes wraps args in a single nested array; flatten. */
-    private function flattenParameters(array $params): array
+    protected function flattenParameters(array $params): array
     {
         $out = [];
         foreach ($params as $p) {

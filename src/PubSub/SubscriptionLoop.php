@@ -4,7 +4,9 @@ namespace Resp3\Laravel\PubSub;
 
 use Closure;
 use Resp3\Laravel\Client\Resp3ClientInterface;
+use Resp3\Laravel\Client\ServerException;
 use Resp3\PushMessage;
+use Resp3\RedisException;
 
 /**
  * Blocking subscribe loop that drives a dedicated Resp3Client.
@@ -41,12 +43,21 @@ final class SubscriptionLoop
         $sub = strtoupper($this->method);
 
         try {
-            $this->client->command($sub, ...$this->channels);
+            // Write only: in RESP3 the subscribe confirmation is itself a
+            // push frame, so it arrives through readNext() below and is
+            // skipped there. command() would wait for a regular reply forever.
+            $this->client->send($sub, ...$this->channels);
 
             while (!$this->stop) {
                 $this->dispatchSignals();
 
                 $reply = $this->client->readNext();
+
+                // An error reply (NOPERM on SUBSCRIBE, MOVED on SSUBSCRIBE)
+                // means no frames will ever arrive: surface it, do not spin.
+                if ($reply instanceof RedisException) {
+                    throw new ServerException($reply);
+                }
 
                 $payload = $this->extractPayload($reply);
                 if ($payload === null) continue;
@@ -81,12 +92,17 @@ final class SubscriptionLoop
 
     // ------------------------------------------------------------------ private
 
-    /** @return list<mixed>|null */
+    /**
+     * readNext() yields PushMessage frames; the plain array branch keeps
+     * unit-test stubs that hand back raw arrays working.
+     *
+     * @return list<mixed>|null
+     */
     private function extractPayload(mixed $reply): ?array
     {
         if ($reply instanceof PushMessage)  return $reply->payload;
         if (is_array($reply))                return $reply;
-        // RedisException, scalars, null: not a pub/sub frame, skip.
+        // Scalars, null: not a pub/sub frame, skip.
         return null;
     }
 
@@ -120,7 +136,8 @@ final class SubscriptionLoop
                 'psubscribe' => 'PUNSUBSCRIBE',
                 'ssubscribe' => 'SUNSUBSCRIBE',
             };
-            $this->client->command($unsub);
+            // Write only, for the same reason as the subscribe in run().
+            $this->client->send($unsub);
         } catch (\Throwable) {
             // Socket may already be dead; we are tearing down anyway.
         }

@@ -4,6 +4,7 @@ namespace Resp3\Laravel\Cluster;
 
 use Resp3\Laravel\Client\ConnectionException;
 use Resp3\Laravel\Client\Resp3Client;
+use Resp3\Laravel\Client\ServerCapabilities;
 use Resp3\RedisException;
 use RuntimeException;
 
@@ -54,7 +55,12 @@ final class Resp3ClusterRouter
     }
 
     /**
-     * Send one command. Routes by slot, retries on MOVED/ASK with backoff.
+     * Send one command. Routes by slot and retries inside the maxRetries
+     * budget on: MOVED (update slot map), ASK (one-shot ASKING redirect),
+     * TRYAGAIN and LOADING (same node after a backoff), CLUSTERDOWN (reload
+     * topology, then backoff), and socket errors. Any other error reply is
+     * returned as a RedisException value; when the budget runs out on a
+     * retryable error that last error reply is returned.
      */
     public function command(string $name, mixed ...$args): mixed
     {
@@ -65,6 +71,8 @@ final class Resp3ClusterRouter
 
         $askingNext = null;          // "host:port" if next command must use ASKING
         $delayMs    = 10;
+        $lastError  = null;          // last retryable error reply seen
+        $lastFailure = null;         // ConnectionException of the last attempt, if any
 
         for ($attempt = 0; $attempt < $this->maxRetries; $attempt++) {
             $addr   = $askingNext ?? $this->pickAddrForSlot($slot, $isRead);
@@ -80,16 +88,29 @@ final class Resp3ClusterRouter
                 unset($this->nodes[$addr]);
                 $this->reloadTopology();
                 $askingNext = null;
-                usleep($delayMs * 1000);
-                $delayMs   = min($delayMs * 2, 200);
+                $lastError  = null;  // let the connection failure surface, not an older reply
+                $lastFailure = $e;
+                $this->backoff($delayMs);
                 continue;
             }
 
-            if ($reply instanceof RedisException) {
-                $redirect = RedirectionParser::parse($reply->getMessage());
-                if ($redirect !== null) {
+            if (!($reply instanceof RedisException)) {
+                return $reply;
+            }
+
+            $lastError   = $reply;
+            $lastFailure = null;
+
+            switch ($reply->prefix) {
+                case 'MOVED':
+                case 'ASK':
+                    // RedirectionParser still extracts slot, host and port.
+                    $redirect = RedirectionParser::parse($reply->getMessage());
+                    if ($redirect === null) {
+                        return $reply;
+                    }
                     $newAddr = "{$redirect['host']}:{$redirect['port']}";
-                    if ($redirect['kind'] === 'MOVED') {
+                    if ($reply->prefix === 'MOVED') {
                         // Update the slot map; treat as authoritative for now.
                         $this->masters[$redirect['slot']] = $newAddr;
                         $askingNext = null;
@@ -97,24 +118,77 @@ final class Resp3ClusterRouter
                         // ASK: one-shot redirect, don't touch the slot map.
                         $askingNext = $newAddr;
                     }
-                    continue;
-                }
+                    continue 2;
+
+                case 'TRYAGAIN':
+                    // Multi-key command during resharding: same node, later.
+                case 'LOADING':
+                    // Node is loading its dataset: same node, later.
+                    $this->backoff($delayMs);
+                    continue 2;
+
+                case 'CLUSTERDOWN':
+                    try {
+                        $this->reloadTopology();
+                    } catch (ConnectionException) {
+                        // No seed answered; keep the old map and retry.
+                    }
+                    $askingNext = null;
+                    $this->backoff($delayMs);
+                    continue 2;
             }
 
             return $reply;
         }
 
+        if ($lastError !== null) {
+            return $lastError;
+        }
+        if ($lastFailure !== null) {
+            throw $lastFailure;
+        }
+
         throw new RuntimeException("Cluster command failed after {$this->maxRetries} retries");
+    }
+
+    /** Sleep for the current delay, then double it (capped at 200 ms). */
+    private function backoff(int &$delayMs): void
+    {
+        usleep($delayMs * 1000);
+        $delayMs = min($delayMs * 2, 200);
     }
 
     /**
      * Send a same-slot pipeline. Useful for MULTI/EXEC after CROSSSLOT validation.
      *
+     * When a reply is a MOVED redirect (inside MULTI that is the first queued
+     * command, and EXEC then aborts, so nothing ran) the slot map is updated
+     * from the redirect and the pipeline is sent once more to the new owner.
+     *
      * @param  list<list<string>>  $commands  Each inner list: [name, ...args]
      */
     public function pipelineSameSlot(array $commands, string $hashKey): array
     {
-        $slot   = CRC16::slot($hashKey);
+        $slot    = CRC16::slot($hashKey);
+        $replies = $this->pipelineOnSlotOwner($commands, $slot);
+
+        foreach ($replies as $reply) {
+            if ($reply instanceof RedisException && $reply->prefix === 'MOVED') {
+                $redirect = RedirectionParser::parse($reply->getMessage());
+                if ($redirect === null) {
+                    break;
+                }
+                $this->masters[$redirect['slot']] = "{$redirect['host']}:{$redirect['port']}";
+                return $this->pipelineOnSlotOwner($commands, $slot);
+            }
+        }
+
+        return $replies;
+    }
+
+    /** @param list<list<string>> $commands */
+    private function pipelineOnSlotOwner(array $commands, int $slot): array
+    {
         $addr   = $this->pickAddrForSlot($slot, isRead: false);
         $client = $this->connectionFor($addr, isReplica: false);
         return $client->pipeline($commands);
@@ -136,6 +210,26 @@ final class Resp3ClusterRouter
             $out[$addr] = $client->command($name, ...$args);
         }
         return $out;
+    }
+
+    /**
+     * Capabilities of one live master, used as the cluster's feature gates
+     * (nodes of one cluster run the same server build). Tries each master in
+     * turn and drops a node whose socket fails.
+     */
+    public function capabilities(): ServerCapabilities
+    {
+        $this->ensureTopology();
+        $errors = [];
+        foreach (array_values(array_unique($this->masters)) as $addr) {
+            try {
+                return $this->connectionFor($addr, isReplica: false)->capabilities();
+            } catch (ConnectionException $e) {
+                unset($this->nodes[$addr]);
+                $errors[] = "{$addr}: " . $e->getMessage();
+            }
+        }
+        throw new ConnectionException('No cluster master reachable for capabilities: ' . implode('; ', $errors));
     }
 
     public function disconnect(): void
@@ -351,6 +445,7 @@ final class Resp3ClusterRouter
             'GET','SET','SETEX','SETNX','INCR','DECR','INCRBY','DECRBY',
             'EXPIRE','PERSIST','TTL','PTTL','TYPE','STRLEN','GETRANGE',
             'BITCOUNT','BITPOS','APPEND','GETSET',
+            'GETDEL','GETEX','DELEX','DIGEST',
             'HSET','HGET','HMSET','HMGET','HGETALL','HKEYS','HVALS','HLEN',
             'HEXISTS','HSTRLEN','HDEL','HINCRBY','HINCRBYFLOAT',
             'LPUSH','RPUSH','LPOP','RPOP','LLEN','LRANGE','LINDEX','LSET',
@@ -364,6 +459,10 @@ final class Resp3ClusterRouter
                 => $args === [] ? [] : [$args[0]],
             'MGET' => $args,
             'MSET','MSETNX' => $this->everyOther($args, 0),
+            // MSETEX numkeys key value [key value ...] [NX|XX] [EX ...]
+            'MSETEX' => $args === []
+                ? []
+                : $this->everyOther(array_slice($args, 1, 2 * max(0, (int) $args[0])), 0),
             'DEL','EXISTS','UNLINK','TOUCH' => $args,
             'EVAL','EVALSHA' => count($args) >= 2
                 ? array_slice($args, 2, (int) $args[1])

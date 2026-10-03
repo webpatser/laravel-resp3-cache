@@ -7,6 +7,7 @@ use Closure;
 use Illuminate\Redis\Events\CommandExecuted;
 use Illuminate\Redis\Events\CommandFailed;
 use Resp3\Laravel\Client\Resp3Client;
+use Resp3\Laravel\Client\ServerCapabilities;
 use Resp3\Laravel\Cluster\CRC16;
 use Resp3\Laravel\Cluster\Resp3ClusterRouter;
 use Resp3\Laravel\PubSub\SubscriptionLoop;
@@ -51,7 +52,7 @@ class Resp3ClusterConnection extends Resp3Connection
 
         // Broadcast commands.
         if (in_array($upper, ['FLUSHDB', 'FLUSHALL'], true)) {
-            return $this->dispatch($method, $parameters, fn () => $this->router->broadcastToMasters($upper));
+            return $this->dispatch($method, $parameters, fn () => $this->broadcast($upper));
         }
 
         return $this->dispatch($method, $parameters, function () use ($upper, $parameters) {
@@ -77,10 +78,14 @@ class Resp3ClusterConnection extends Resp3Connection
         $this->multiHashKey = null;
 
         // Send MULTI + buffered commands + EXEC as one same-slot pipeline.
+        // Same contract as Resp3Connection::exec(): the EXEC array is
+        // returned with nested RedisException elements as is, an error
+        // before EXEC (or EXECABORT) throws ServerException.
         $payload = [['MULTI'], ...$buffered, ['EXEC']];
         $replies = $this->router->pipelineSameSlot($payload, $hashKey);
-        // Last reply is EXEC: an array of per-command results.
-        return end($replies);
+        $execReply = array_pop($replies);
+
+        return $this->transactionResult($replies, $execReply);
     }
 
     public function discard()
@@ -90,9 +95,15 @@ class Resp3ClusterConnection extends Resp3Connection
         return null;
     }
 
+    /** Feature gates from one live master; cluster detection is auto only. */
+    public function capabilities(): ServerCapabilities
+    {
+        return $this->router->capabilities();
+    }
+
     public function flushdb()
     {
-        return $this->router->broadcastToMasters('FLUSHDB');
+        return $this->dispatch('flushdb', [], fn () => $this->broadcast('FLUSHDB'));
     }
 
     public function disconnect(): void
@@ -136,11 +147,31 @@ class Resp3ClusterConnection extends Resp3Connection
 
     // ------------------------------------------------------------------ helpers
 
+    /**
+     * Run a command on every master. The first node that replied with an
+     * error throws ServerException; otherwise the address => reply map is
+     * returned.
+     *
+     * @return array<string, mixed>
+     */
+    private function broadcast(string $command): array
+    {
+        $replies = $this->router->broadcastToMasters($command);
+        foreach ($replies as $reply) {
+            $this->throwIfError($reply);
+        }
+        return $replies;
+    }
+
     private function dispatch(string $method, array $parameters, Closure $work): mixed
     {
         $start = microtime(true);
         try {
-            $result = $work();
+            // Same error policy as Resp3Connection::command(): the router has
+            // already consumed MOVED / ASK / TRYAGAIN / LOADING / CLUSTERDOWN,
+            // so an error reply here is final and throws ServerException.
+            // Broadcast replies (address => reply arrays) pass through as is.
+            $result = $this->throwIfError($work());
         } catch (Throwable $e) {
             $this->events?->dispatch(new CommandFailed($method, $parameters, $e, $this));
             throw $e;
