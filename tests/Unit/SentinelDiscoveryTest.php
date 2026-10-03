@@ -102,9 +102,13 @@ final class SentinelDiscoveryTest extends TestCase
     }
 }
 
-/** Stand-in for a Resp3ClientInterface — never opens a socket. */
+/** Stand-in for a Resp3ClientInterface, never opens a socket. */
 final class FakeSentinel implements \Resp3\Laravel\Client\Resp3ClientInterface
 {
+    use \Resp3\Laravel\Tests\Support\ClientStubDefaults;
+
+    public function send(string $name, mixed ...$args): void {}
+
     public function __construct(
         public mixed $reply = null,
         public bool $throwsOnConnect = false,

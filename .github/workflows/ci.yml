@@ -8,15 +8,18 @@ on:
 
 jobs:
   test:
-    name: PHP ${{ matrix.php }} on ${{ matrix.os }}
+    name: PHP ${{ matrix.php }} on ${{ matrix.server }}
     runs-on: ${{ matrix.os }}
+    env:
+      RESP3_TEST_HOST: 127.0.0.1
+      RESP3_TEST_PORT: 6379
     services:
       redis:
-        image: valkey/valkey:8
+        image: ${{ matrix.server }}
         ports:
           - 6379:6379
         options: >-
-          --health-cmd "valkey-cli ping"
+          --health-cmd "${{ matrix.cli }} ping"
           --health-interval 5s
           --health-timeout 3s
           --health-retries 5
@@ -26,6 +29,14 @@ jobs:
       matrix:
         php: ['8.4', '8.5']
         os: [ubuntu-24.04]
+        server: ['valkey/valkey:8.1', 'valkey/valkey:9.1', 'redis:8.10']
+        include:
+          - server: 'valkey/valkey:8.1'
+            cli: valkey-cli
+          - server: 'valkey/valkey:9.1'
+            cli: valkey-cli
+          - server: 'redis:8.10'
+            cli: redis-cli
 
     steps:
       - uses: actions/checkout@v4
@@ -35,11 +46,13 @@ jobs:
         with:
           php-version: ${{ matrix.php }}
           tools: composer
+          extensions: apcu
+          ini-values: apc.enable_cli=1
           coverage: none
 
       - name: Build ext-resp3 from source
         run: |
-          git clone --depth 1 https://github.com/webpatser/php-resp3.git "$RUNNER_TEMP/php-resp3"
+          git clone --depth 1 --branch v0.2.0 https://github.com/webpatser/php-resp3.git "$RUNNER_TEMP/php-resp3"
           cd "$RUNNER_TEMP/php-resp3"
           phpize
           ./configure --enable-resp3
@@ -77,11 +90,13 @@ jobs:
         with:
           php-version: ${{ matrix.php }}
           tools: composer
+          extensions: apcu
+          ini-values: apc.enable_cli=1
           coverage: none
 
       - name: Build ext-resp3 from source
         run: |
-          git clone --depth 1 https://github.com/webpatser/php-resp3.git "$RUNNER_TEMP/php-resp3"
+          git clone --depth 1 --branch v0.2.0 https://github.com/webpatser/php-resp3.git "$RUNNER_TEMP/php-resp3"
           cd "$RUNNER_TEMP/php-resp3"
           phpize
           ./configure --enable-resp3

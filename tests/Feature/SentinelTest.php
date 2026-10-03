@@ -26,7 +26,6 @@ final class SentinelTest extends TestCase
             'options' => [
                 'replication' => 'sentinel',
                 'service'     => 'mymaster',
-                'prefix'      => 'r3sent:',
                 'timeout'     => 2.0,
                 'sentinel_timeout' => 1.0,
             ],
@@ -38,7 +37,8 @@ final class SentinelTest extends TestCase
         ]);
         $app['config']->set('cache.default', 'redis');
         $app['config']->set('cache.stores.redis', [
-            'driver' => 'redis',
+            'driver' => 'resp3',
+            'prefix' => 'r3sent:',
             'connection' => 'default',
         ]);
     }

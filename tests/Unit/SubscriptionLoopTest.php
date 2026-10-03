@@ -4,6 +4,7 @@ namespace Resp3\Laravel\Tests\Unit;
 
 use PHPUnit\Framework\TestCase;
 use Resp3\Laravel\Client\Resp3ClientInterface;
+use Resp3\Laravel\Tests\Support\ClientStubDefaults;
 use Resp3\Laravel\PubSub\SubscriptionLoop;
 
 /**
@@ -101,6 +102,13 @@ final class SubscriptionLoopTest extends TestCase
 /** Test double implementing Resp3ClientInterface. */
 final class StubClient implements Resp3ClientInterface
 {
+    use ClientStubDefaults;
+
+    public function send(string $name, mixed ...$args): void
+    {
+        $this->command($name, ...$args);
+    }
+
     /** @var list<string> */
     public array $commandsSent = [];
     public bool $closed = false;

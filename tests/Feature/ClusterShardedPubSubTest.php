@@ -92,8 +92,8 @@ final class ClusterShardedPubSubTest extends TestCase
         $tmp    = tempnam(sys_get_temp_dir(), 'r3-shard-sub-');
         file_put_contents($tmp, $script);
 
-        $extPath = '/Users/christoph/Development/Github/php-resp3/modules/resp3.so';
-        $cmd = ['php', '-d', "extension={$extPath}", $tmp];
+        // The child inherits the ini of this process, which already loads ext-resp3.
+        $cmd = [PHP_BINARY, $tmp];
 
         $proc = proc_open(
             $cmd,
@@ -116,9 +116,10 @@ final class ClusterShardedPubSubTest extends TestCase
     private function subscriberScript(string $channel): string
     {
         $chEsc = var_export($channel, true);
+        $autoload = dirname(__DIR__, 2) . '/vendor/autoload.php';
         return <<<PHP
         <?php
-        require '/Users/christoph/Development/Github/laravel-resp3-cache/vendor/autoload.php';
+        require '{$autoload}';
 
         use Resp3\\Laravel\\Client\\Resp3Client;
         use Resp3\\Laravel\\Cluster\\CRC16;

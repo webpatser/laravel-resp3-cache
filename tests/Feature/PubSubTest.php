@@ -4,6 +4,7 @@ namespace Resp3\Laravel\Tests\Feature;
 
 use Illuminate\Support\Facades\Redis;
 use Orchestra\Testbench\TestCase;
+use Resp3\Laravel\Tests\Support\Env;
 use Resp3\Laravel\Resp3ServiceProvider;
 
 /**
@@ -26,8 +27,8 @@ final class PubSubTest extends TestCase
         $app['config']->set('database.redis', [
             'client' => 'resp3',
             'default' => [
-                'host' => '127.0.0.1',
-                'port' => 6379,
+                'host' => Env::host(),
+                'port' => Env::port(),
                 'database' => 0,
             ],
         ]);
@@ -38,8 +39,8 @@ final class PubSubTest extends TestCase
         if (!extension_loaded('resp3')) {
             $this->markTestSkipped('ext-resp3 is not loaded');
         }
-        if (!@fsockopen('127.0.0.1', 6379, $_, $_, 0.5)) {
-            $this->markTestSkipped('No Redis or Valkey reachable on 127.0.0.1:6379');
+        if (!Env::reachable()) {
+            $this->markTestSkipped('No Redis or Valkey reachable on ' . Env::address());
         }
         parent::setUp();
     }
@@ -91,8 +92,9 @@ final class PubSubTest extends TestCase
         $tmp    = tempnam(sys_get_temp_dir(), 'r3-sub-');
         file_put_contents($tmp, $script);
 
-        $extPath = '/Users/christoph/Development/Github/php-resp3/modules/resp3.so';
-        $cmd = ['php', '-d', "extension={$extPath}", $tmp];
+        // The test process already loaded ext-resp3; the child inherits the
+        // same ini, so loading it again would print a warning on stdout.
+        $cmd = [PHP_BINARY, $tmp];
 
         $proc = proc_open(
             $cmd,
@@ -110,14 +112,17 @@ final class PubSubTest extends TestCase
     {
         $argEsc = var_export($arg, true);
         $modeEsc = var_export($mode, true);
+        $autoload = dirname(__DIR__, 2) . '/vendor/autoload.php';
+        $host = Env::host();
+        $port = Env::port();
         return <<<PHP
         <?php
-        require '/Users/christoph/Development/Github/laravel-resp3-cache/vendor/autoload.php';
+        require '{$autoload}';
 
         use Resp3\\Laravel\\Client\\Resp3Client;
         use Resp3\\Laravel\\PubSub\\SubscriptionLoop;
 
-        \$client = new Resp3Client(host: '127.0.0.1', port: 6379, timeout: 0.0);
+        \$client = new Resp3Client(host: '{$host}', port: {$port}, timeout: 0.0);
         // Open the connection up front so the parent's PUBLISH after READY hits a real subscriber.
         \$client->command('PING');
         echo "READY\\n";

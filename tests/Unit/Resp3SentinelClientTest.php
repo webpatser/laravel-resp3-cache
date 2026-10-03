@@ -5,6 +5,7 @@ namespace Resp3\Laravel\Tests\Unit;
 use PHPUnit\Framework\TestCase;
 use Resp3\Laravel\Client\ConnectionException;
 use Resp3\Laravel\Client\Resp3ClientInterface;
+use Resp3\Laravel\Tests\Support\ClientStubDefaults;
 use Resp3\Laravel\Sentinel\Resp3SentinelClient;
 use Resp3\Laravel\Sentinel\SentinelDiscovery;
 
@@ -113,6 +114,13 @@ final class Resp3SentinelClientTest extends TestCase
 /** Records every command and can be primed with a queue of replies. */
 final class RecordingClient implements Resp3ClientInterface
 {
+    use ClientStubDefaults;
+
+    public function send(string $name, mixed ...$args): void
+    {
+        $this->command($name, ...$args);
+    }
+
     /** @var list<array> */
     public array $commandsSent = [];
     public bool $closed = false;

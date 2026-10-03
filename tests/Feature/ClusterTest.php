@@ -28,7 +28,6 @@ final class ClusterTest extends TestCase
             'client' => 'resp3',
             'options' => [
                 'cluster' => 'redis',
-                'prefix' => 'r3clust:',
             ],
             'clusters' => [
                 'default' => [
@@ -44,7 +43,8 @@ final class ClusterTest extends TestCase
         ]);
         $app['config']->set('cache.default', 'redis');
         $app['config']->set('cache.stores.redis', [
-            'driver' => 'redis',
+            'driver' => 'resp3',
+            'prefix' => 'r3clust:',
             'connection' => 'default',
         ]);
     }

@@ -2,12 +2,15 @@
 
 EXT_RESP3 ?= /Users/christoph/Development/Github/php-resp3/modules/resp3.so
 PHP       := php -d extension=$(EXT_RESP3)
+RESP3_TEST_HOST ?= 127.0.0.1
+RESP3_TEST_PORT ?= 6379
+export RESP3_TEST_HOST RESP3_TEST_PORT
 
 help:
 	@echo "Targets:"
 	@echo "  test              Run unit + feature tests (single-node)"
 	@echo "  test-unit         Unit tests only"
-	@echo "  test-feature      Feature tests against single-node Redis on 127.0.0.1:6379"
+	@echo "  test-feature      Feature tests against single-node Redis on $(RESP3_TEST_HOST):$(RESP3_TEST_PORT)"
 	@echo "  cluster-up        Boot the 6-node Valkey cluster on 127.0.0.1:7100-7105 (port 7000 collides with macOS AirPlay Receiver)"
 	@echo "  cluster-down      Tear it down"
 	@echo "  cluster-test      cluster-up + cluster suite + cluster-down"
