@@ -1,28 +1,29 @@
 # 6-node Valkey cluster (3 masters + 3 replicas) for local and CI tests.
 #
-# Networking: each node maps its port to the host (7100-7105 + bus
-# 17100-17105) and announces 127.0.0.1 as its bus IP. This works on Linux
-# (CI runners) where the bridge network and host loopback are reachable
-# from each other. On macOS Docker Desktop the cluster bus messages
-# between containers can fail to traverse the announced 127.0.0.1, so
-# CLUSTER MEET sometimes hangs. CI is the source of truth for cluster
-# tests; for local dev you can either run on a Linux host or skip cluster
-# tests with `make test` (single-node only).
+# Networking: the nodes talk to each other over the compose bridge network
+# (the cluster bus uses each container's own bridge IP), while
+# --cluster-announce-client-ipv4 makes every node advertise 127.0.0.1 to
+# clients in MOVED/ASK redirects, CLUSTER SHARDS and CLUSTER SLOTS. Each
+# node's client port is mapped 1:1 to the host (7100-7105), so a client on
+# the host reaches every advertised address. The same setup works on Linux
+# (CI) and on macOS Docker Desktop.
+#
+# Do not use --cluster-announce-ip 127.0.0.1 here: that also changes the
+# bus address, and inside a container 127.0.0.1 is the container itself,
+# so the nodes never finish the CLUSTER MEET handshake.
 
 services:
   valkey-1:
     image: valkey/valkey:8
     container_name: r3-cluster-1
-    ports: ["7100:7100", "17100:17100"]
+    ports: ["7100:7100"]
     command: >-
       valkey-server
       --port 7100
       --cluster-enabled yes
       --cluster-config-file /tmp/nodes-7100.conf
       --cluster-node-timeout 5000
-      --cluster-announce-ip 127.0.0.1
-      --cluster-announce-port 7100
-      --cluster-announce-bus-port 17100
+      --cluster-announce-client-ipv4 127.0.0.1
       --appendonly yes
       --protected-mode no
     healthcheck:
@@ -33,15 +34,13 @@ services:
   valkey-2:
     image: valkey/valkey:8
     container_name: r3-cluster-2
-    ports: ["7101:7101", "17101:17101"]
+    ports: ["7101:7101"]
     command: >-
       valkey-server
       --port 7101 --cluster-enabled yes
       --cluster-config-file /tmp/nodes-7101.conf
       --cluster-node-timeout 5000
-      --cluster-announce-ip 127.0.0.1
-      --cluster-announce-port 7101
-      --cluster-announce-bus-port 17101
+      --cluster-announce-client-ipv4 127.0.0.1
       --appendonly yes --protected-mode no
     healthcheck:
       test: ["CMD", "valkey-cli", "-p", "7101", "ping"]
@@ -51,15 +50,13 @@ services:
   valkey-3:
     image: valkey/valkey:8
     container_name: r3-cluster-3
-    ports: ["7102:7102", "17102:17102"]
+    ports: ["7102:7102"]
     command: >-
       valkey-server
       --port 7102 --cluster-enabled yes
       --cluster-config-file /tmp/nodes-7102.conf
       --cluster-node-timeout 5000
-      --cluster-announce-ip 127.0.0.1
-      --cluster-announce-port 7102
-      --cluster-announce-bus-port 17102
+      --cluster-announce-client-ipv4 127.0.0.1
       --appendonly yes --protected-mode no
     healthcheck:
       test: ["CMD", "valkey-cli", "-p", "7102", "ping"]
@@ -69,15 +66,13 @@ services:
   valkey-4:
     image: valkey/valkey:8
     container_name: r3-cluster-4
-    ports: ["7103:7103", "17103:17103"]
+    ports: ["7103:7103"]
     command: >-
       valkey-server
       --port 7103 --cluster-enabled yes
       --cluster-config-file /tmp/nodes-7103.conf
       --cluster-node-timeout 5000
-      --cluster-announce-ip 127.0.0.1
-      --cluster-announce-port 7103
-      --cluster-announce-bus-port 17103
+      --cluster-announce-client-ipv4 127.0.0.1
       --appendonly yes --protected-mode no
     healthcheck:
       test: ["CMD", "valkey-cli", "-p", "7103", "ping"]
@@ -87,15 +82,13 @@ services:
   valkey-5:
     image: valkey/valkey:8
     container_name: r3-cluster-5
-    ports: ["7104:7104", "17104:17104"]
+    ports: ["7104:7104"]
     command: >-
       valkey-server
       --port 7104 --cluster-enabled yes
       --cluster-config-file /tmp/nodes-7104.conf
       --cluster-node-timeout 5000
-      --cluster-announce-ip 127.0.0.1
-      --cluster-announce-port 7104
-      --cluster-announce-bus-port 17104
+      --cluster-announce-client-ipv4 127.0.0.1
       --appendonly yes --protected-mode no
     healthcheck:
       test: ["CMD", "valkey-cli", "-p", "7104", "ping"]
@@ -105,15 +98,13 @@ services:
   valkey-6:
     image: valkey/valkey:8
     container_name: r3-cluster-6
-    ports: ["7105:7105", "17105:17105"]
+    ports: ["7105:7105"]
     command: >-
       valkey-server
       --port 7105 --cluster-enabled yes
       --cluster-config-file /tmp/nodes-7105.conf
       --cluster-node-timeout 5000
-      --cluster-announce-ip 127.0.0.1
-      --cluster-announce-port 7105
-      --cluster-announce-bus-port 17105
+      --cluster-announce-client-ipv4 127.0.0.1
       --appendonly yes --protected-mode no
     healthcheck:
       test: ["CMD", "valkey-cli", "-p", "7105", "ping"]

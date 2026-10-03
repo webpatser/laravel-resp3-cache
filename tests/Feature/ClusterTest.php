@@ -11,7 +11,7 @@ use RuntimeException;
 /**
  * End-to-end cluster tests: Cache facade -> RedisStore -> ClusterConnection
  * -> Resp3ClusterRouter -> Resp3Client per node -> ext-resp3 -> 6-node Valkey
- * cluster on 127.0.0.1:7000-7005.
+ * cluster on 127.0.0.1:7100-7105 (boot it with tests/cluster/setup.sh).
  *
  * Skips if the cluster is not running.
  */
@@ -86,14 +86,24 @@ final class ClusterTest extends TestCase
         $this->assertSame('admin', $got['{user1}.role']);
     }
 
-    public function test_many_cross_slot_throws_crossslot(): void
+    public function test_many_cross_slot_groups_keys_by_slot(): void
     {
+        // Resp3Store::many() sends one MGET per slot instead of a CROSSSLOT error.
         Cache::put('alpha', '1', 60);
         Cache::put('bravo', '2', 60);
 
+        $this->assertSame(
+            ['alpha' => '1', 'bravo' => '2', 'missing' => null],
+            Cache::many(['alpha', 'bravo', 'missing']),
+        );
+    }
+
+    public function test_raw_mget_cross_slot_throws_crossslot(): void
+    {
+        // "foo" (slot 12182) and "bar" (slot 5061) live on different masters.
         $this->expectException(RuntimeException::class);
         $this->expectExceptionMessageMatches('/CROSSSLOT/i');
-        Cache::many(['alpha', 'bravo']);
+        Redis::connection()->mget(['foo', 'bar']);
     }
 
     public function test_flush_broadcasts_to_all_masters(): void

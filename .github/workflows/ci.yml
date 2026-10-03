@@ -108,15 +108,8 @@ jobs:
           php -m | grep resp3
 
       - name: Boot cluster
-        run: |
-          docker compose -f tests/cluster/docker-compose.yml up -d --wait
-          # Wait for cluster-init to finish; it exits when topology is ready.
-          for _ in $(seq 1 30); do
-            state=$(docker compose -f tests/cluster/docker-compose.yml ps -a --status=exited --services | grep -c cluster-init || true)
-            if [ "$state" = "1" ]; then break; fi
-            sleep 1
-          done
-          docker compose -f tests/cluster/docker-compose.yml logs cluster-init | tail -20
+        # Fails the job unless every node reports cluster_state:ok.
+        run: tests/cluster/setup.sh
 
       - name: composer install
         run: composer install --no-progress --prefer-dist
