@@ -2,6 +2,7 @@
 
 namespace Resp3\Laravel\Tests\Unit;
 
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Resp3\Laravel\Cluster\CRC16;
 
@@ -27,7 +28,7 @@ final class CRC16Test extends TestCase
         ];
     }
 
-    /** @dataProvider vectors */
+    #[DataProvider('vectors')]
     public function test_slot_calculation(string $key, int $expectedSlot): void
     {
         $this->assertSame($expectedSlot, CRC16::slot($key));

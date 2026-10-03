@@ -5,6 +5,7 @@ namespace Resp3\Laravel\Tests\Feature;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Redis;
 use Orchestra\Testbench\TestCase;
+use PHPUnit\Framework\Attributes\Group;
 use Resp3\Laravel\Resp3ServiceProvider;
 
 /**
@@ -77,7 +78,7 @@ final class SentinelTest extends TestCase
         $this->assertSame(['a' => '1', 'b' => '2', 'c' => '3'], Cache::many(['a', 'b', 'c']));
     }
 
-    /** @group failover */
+    #[Group('failover')]
     public function test_failover_picks_up_new_master(): void
     {
         Cache::put('before', 'one', 60);
