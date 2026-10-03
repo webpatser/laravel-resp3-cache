@@ -9,6 +9,138 @@ minor and are called out in the entry.
 
 Nothing yet.
 
+## [0.7.0] - 2026-10-03
+
+Adopts ext-resp3 0.2.0 (typed error replies, push queue, hardened parser),
+adds the `resp3` cache driver with server feature detection, and adds
+opt-in client-side caching on `CLIENT TRACKING`.
+
+### Upgrade
+
+Breaking changes, in the order you are likely to hit them:
+
+- ext-resp3 `^0.2` is required (php-resp3 0.2.0). `composer.json` now
+  declares `ext-resp3: ^0.2`; run `pie install webpatser/php-resp3:^0.2`.
+- `Resp3Connection::command()` throws `Resp3\Laravel\Client\ServerException`
+  (extends `RuntimeException`) for error replies instead of returning a
+  `Resp3\RedisException` value. `ServerException` has a readonly `prefix`
+  (the first token of the error, such as `WRONGTYPE`) and
+  `getRedisException()`. The client layer (`Resp3Client`, the cluster
+  router, the sentinel client) still returns errors as values so redirects
+  and READONLY routing keep working.
+- `exec()` returns the `EXEC` array with nested `Resp3\RedisException`
+  elements as is. `EXECABORT` and queue-time errors throw
+  `ServerException`.
+- `Resp3ClientInterface` gained `send()` (write only), `drainPushes()`
+  and `setPushListener()`; `readNext()` returns queued pushes first.
+  Custom implementations of the interface must add them.
+- `Resp3Client` and `Resp3SentinelClient` take a trailing
+  `array $features = []` constructor argument.
+- `putMany()` now returns the real result. Before, it always returned
+  false.
+- Key prefixing is the cache store `prefix`. The connection `options.prefix`
+  setting was never applied and is not supported; move it to the store.
+- `disable()` of a feature does not survive a sentinel failover:
+  re-detection runs `HELLO` again and the fallback fires once more.
+- `drainPushes()` returns what it received when the server closes the
+  connection mid-drain, closes the socket and does not throw; the next
+  command reconnects.
+- Cluster connections detect capabilities from the first live master;
+  `features` overrides are not supported there.
+- A feature is disabled on `NOPERM` only when the error message contains
+  "command".
+
+### Added
+
+- `resp3` cache driver (`'driver' => 'resp3'`): `Resp3\Laravel\Cache\Resp3Store`
+  and `Resp3\Laravel\Cache\Resp3Lock`, registered by the service provider.
+  It takes the same options as the `redis` driver.
+- `Resp3\Laravel\Client\ServerCapabilities`: server identity and feature
+  gates read from the `HELLO 3` reply, with `fromHello(array $hello, array $overrides = [], ?Closure $infoServer = null)`,
+  `delex()`, `setIfEq()`, `msetex()`, `increx()`, `has()`, `disable()`,
+  `server()`, `version()`, `id()`, `mode()`, `isRedis()`, `isValkey()` and
+  `toArray()`. Gates: `DELEX` Redis 8.4.0; `SET ... IFEQ` Redis 8.4.0 and
+  Valkey 8.1.0; `MSETEX` Redis 8.4.4 and Valkey 9.1.0; `INCREX` Redis
+  8.8.0. Valkey answering `HELLO` as redis 7.2.x triggers one
+  `INFO server` read of `valkey_version`. A `features` option overrides
+  detection with `true`, `false` or `'auto'`.
+  `Resp3Connection::capabilities()` exposes it.
+- Self-healing: a feature command answered with `ERR unknown command`
+  (or `NOPERM` mentioning the command) disables the feature on that
+  connection and the call falls back once.
+- `Resp3Store::putIfEquals(string $key, mixed $expected, mixed $value, ?int $seconds = null): bool`,
+  compare-and-set on `SET ... IFEQ`. Throws `BadMethodCallException` when
+  the server lacks it.
+- `Resp3Lock::refresh(?int $seconds = null): bool`. `Resp3Lock::release()`
+  uses `DELEX` when available, else the Lua script.
+- `add()` uses a single `SET ... EX ... NX`. `putMany()` uses `MSETEX`
+  when available, `SETEX` per key on a cluster when the keys span slots,
+  else `MULTI`/`SETEX`/`EXEC`.
+- Client-side caching on `CLIENT TRACKING` (opt in with the
+  `client_tracking` block of a `resp3` store; single node and sentinel
+  only). Modes `optin` and `bcast`, local stores `array` (per-process LRU)
+  and `apcu`, `local_store => 'auto'`, `local_ttl`, `max_entries`,
+  `max_value_bytes`, `noloop`. A tracked `GET` is one pipeline of
+  `CLIENT CACHING YES`, `GET`, `PTTL` (`MGET` plus one `PTTL` per key);
+  a local entry lives for the smaller of `local_ttl` and the server TTL.
+  Pushes are drained before every local hit, an invalidation that arrives
+  with a reply blocks the local store, `FLUSHDB` and `FLUSHALL` clear the
+  namespace, and `tracking-redir-broken` disables tracking for the
+  connection. Classes live in `Resp3\Laravel\Tracking`. See the README
+  for the persistent-connection requirement under PHP-FPM and the memory
+  bound. The `max_bytes` key (default 33554432, 32 MiB, key plus value
+  bytes) caps the array store with LRU eviction; `max_entries` and
+  `max_value_bytes` still apply.
+- Client-side caching details: the `apcu` store needs `local_ttl` of at
+  least 1 and `auto` picks it only when APCu is loaded, the connection is
+  persistent and `local_ttl` is at least 1. APCu entry names are scoped
+  with an HMAC keyed by `app.key`, so `APP_KEY` must be set for the
+  `apcu` store. A store attaching after another store's handshake, or to
+  a persistent socket that already ran a command this request, starts with
+  an empty namespace. `mode` and `local_store` are validated
+  only when `enabled` is true. Stores on one connection with the same
+  tracking arguments share a namespace; a store with different arguments
+  gets no client-side cache there. `noloop` is incompatible with cache
+  tags and raw writes on the same connection. A push drain is capped at
+  8 MiB (the connection closes, the read falls back to a plain `GET`).
+  The tracking listener and a user `setPushListener()` are chained.
+- Persistent sockets are keyed per database, username and
+  `options.persistent_id`, so `default` and `cache` connections no longer
+  share one socket. A clean persistent socket is kept open at request end
+  (it used to be closed), and on reuse the handshake pipelines `HELLO`
+  and a `PING` nonce to verify the stream is aligned, reconnecting once
+  if not. This is what makes client-side cache reuse work under PHP-FPM.
+- `examples/client_tracking.php`.
+- `RESP3_TEST_HOST` and `RESP3_TEST_PORT` select the server for the
+  feature tests. CI runs Valkey 8.1, Valkey 9.1 and Redis 8.10 on PHP 8.4
+  and 8.5, plus the cluster job.
+
+### Changed
+
+- Every parser is created with the push queue on, so pushes and replies
+  are kept apart.
+- README: new "Cache driver", "Server features", "Client-side caching" and
+  "Testing" sections; limitations updated.
+
+### Fixed
+
+- `putMany()` always returned false: inside `MULTI` the connection
+  returned itself and `setex()` compared it to `'OK'`.
+- `putMany()` and `many()` raised `CROSSSLOT` on a cluster; they now group
+  keys per slot.
+- Protocol errors from the parser are fatal for the stream: the client
+  closes the socket and throws `ConnectionException`, and the next command
+  reconnects.
+- Nested errors inside an `EXEC` reply no longer leak as raw values;
+  `EXECABORT` and queue-time errors throw `ServerException`.
+- `SUBSCRIBE` blocked forever with the push queue on, because its
+  confirmation is itself a push. Subscribing now uses the write-only
+  `send()`.
+- The test cluster never formed: every node announced 127.0.0.1 on the
+  cluster bus. The harness (`tests/cluster/setup.sh`) now needs only
+  Docker, forms the cluster on every host and fails loudly with the node
+  logs when it does not.
+
 ## [0.6.1] - 2026-08-21
 
 ### Fixed
@@ -364,7 +496,8 @@ driver backed by the [ext-resp3][php-resp3] C parser.
 - No Pub/Sub (`subscribe`, `psubscribe` throw `BadMethodCallException`).
 - No connection pooling beyond `STREAM_CLIENT_PERSISTENT`.
 
-[Unreleased]: https://github.com/webpatser/laravel-resp3-cache/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/webpatser/laravel-resp3-cache/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/webpatser/laravel-resp3-cache/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/webpatser/laravel-resp3-cache/compare/v0.6.0...v0.6.1
 [0.1.0]: https://github.com/webpatser/laravel-resp3-cache/releases/tag/v0.1.0
 
