@@ -76,6 +76,7 @@ final class Resp3SentinelConnector implements Connector
             timeout: $timeout,
             persistent: $persistent,
             tlsOptions: $tlsOptions,
+            features: is_array($options['features'] ?? null) ? $options['features'] : [],
         );
 
         $replicaPool = null;

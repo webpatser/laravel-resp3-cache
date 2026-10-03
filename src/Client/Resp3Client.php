@@ -2,7 +2,9 @@
 
 namespace Resp3\Laravel\Client;
 
+use Closure;
 use Resp3\Parser;
+use Resp3\PushMessage;
 use Resp3\RedisException;
 
 /**
@@ -11,12 +13,21 @@ use Resp3\RedisException;
  * Each command writes a RESP-encoded request to the socket, then drives the
  * parser by reading bytes until a complete top-level reply lands. No fibers,
  * no event loop, no callbacks. Drop-in for php-fpm / sync request workflows.
+ *
+ * The parser runs in push-queue mode: push frames (pub/sub messages,
+ * tracking invalidations) never take the place of a command reply, so
+ * pipelines stay aligned when a push arrives between two replies.
  */
 final class Resp3Client implements Resp3ClientInterface
 {
     private mixed $socket = null;
     private Parser $parser;
     private int $readBufferSize = 8192;
+    private ?ServerCapabilities $capabilities = null;
+    private ?Closure $pushListener = null;
+
+    /** @var list<PushMessage> Pushes read during the current command(), handed to the listener after it. */
+    private array $pendingPushes = [];
 
     public function __construct(
         private readonly string $host = '127.0.0.1',
@@ -28,8 +39,9 @@ final class Resp3Client implements Resp3ClientInterface
         private readonly float $timeout = 5.0,
         private readonly bool $persistent = false,
         private readonly array $tlsOptions = [],
+        private readonly array $features = [],
     ) {
-        $this->parser = new Parser();
+        $this->parser = self::newParser();
     }
 
     /**
@@ -42,7 +54,15 @@ final class Resp3Client implements Resp3ClientInterface
     {
         $this->ensureConnected();
         $this->write(CommandEncoder::encode([$name, ...$args]));
-        return $this->readReply();
+        $reply = $this->readReply();
+        $this->flushPushes();
+        return $reply;
+    }
+
+    public function send(string $name, mixed ...$args): void
+    {
+        $this->ensureConnected();
+        $this->write(CommandEncoder::encode([$name, ...$args]));
     }
 
     /**
@@ -68,7 +88,68 @@ final class Resp3Client implements Resp3ClientInterface
         for ($i = 0, $n = count($commands); $i < $n; $i++) {
             $out[] = $this->readReply();
         }
+        $this->flushPushes();
         return $out;
+    }
+
+    public function drainPushes(): array
+    {
+        if (!is_resource($this->socket)) {
+            return [];
+        }
+
+        $eof = false;
+        stream_set_blocking($this->socket, false);
+        try {
+            while (true) {
+                $chunk = @fread($this->socket, $this->readBufferSize);
+                if ($chunk === false || $chunk === '') {
+                    $eof = feof($this->socket);
+                    break;
+                }
+                $this->parser->feed($chunk);
+            }
+        } finally {
+            if (is_resource($this->socket)) {
+                stream_set_blocking($this->socket, true);
+            }
+        }
+
+        $pushes = [];
+        try {
+            while (($push = $this->parser->nextPush()) !== null) {
+                $pushes[] = $push;
+            }
+            $stray = $this->parser->hasNext();
+        } catch (RedisException $e) {
+            $this->protocolFault($e);
+        }
+
+        if ($stray) {
+            // A regular reply with no command outstanding: the reply stream
+            // is out of step with our requests and cannot be trusted.
+            $this->close();
+            throw new ConnectionException('Unexpected reply with no command outstanding');
+        }
+        if ($eof) {
+            $this->close();
+        }
+        return $pushes;
+    }
+
+    public function setPushListener(?Closure $listener): void
+    {
+        $this->pushListener = $listener;
+        if ($listener === null) {
+            $this->pendingPushes = [];
+        }
+    }
+
+    public function capabilities(): ServerCapabilities
+    {
+        $this->ensureConnected();
+        return $this->capabilities
+            ?? throw new ConnectionException('Server capabilities unavailable: handshake did not complete');
     }
 
     public function isConnected(): bool
@@ -82,18 +163,32 @@ final class Resp3Client implements Resp3ClientInterface
             @fclose($this->socket);
         }
         $this->socket = null;
-        $this->parser = new Parser();
+        $this->parser = self::newParser();
+        $this->pendingPushes = [];
     }
 
     /**
-     * Block on the socket until one complete reply or push frame arrives, then
-     * return it. Used by the pub/sub loop after sending SUBSCRIBE / PSUBSCRIBE
-     * to consume server-pushed messages without writing a new command.
+     * Block on the socket until one push frame or regular reply arrives, then
+     * return it. Used by the pub/sub loop after send('SUBSCRIBE', ...) to
+     * consume server-pushed messages without writing a new command. Queued
+     * pushes come first, in wire order.
      */
     public function readNext(): mixed
     {
         $this->ensureConnected();
-        return $this->readReply();
+        try {
+            while (true) {
+                if ($this->parser->hasPush()) {
+                    return $this->parser->nextPush();
+                }
+                if ($this->parser->hasNext()) {
+                    return $this->parser->next();
+                }
+                $this->fill();
+            }
+        } catch (RedisException $e) {
+            $this->protocolFault($e);
+        }
     }
 
     public function __destruct()
@@ -142,9 +237,16 @@ final class Resp3Client implements Resp3ClientInterface
             );
         }
         $this->socket = $socket;
-        $this->parser = new Parser();
+        $this->parser = self::newParser();
 
-        $this->handshake();
+        // A failed handshake must not leave an open socket behind: the next
+        // call would skip HELLO (no RESP3, no AUTH, no capabilities).
+        try {
+            $this->handshake();
+        } catch (\Throwable $e) {
+            $this->close();
+            throw $e;
+        }
     }
 
     private function handshake(): void
@@ -161,6 +263,17 @@ final class Resp3Client implements Resp3ClientInterface
         if ($reply instanceof RedisException) {
             throw new ConnectionException('HELLO failed: ' . $reply->getMessage());
         }
+        if (!is_array($reply)) {
+            throw new ConnectionException('HELLO failed: unexpected reply type ' . get_debug_type($reply));
+        }
+
+        // Detection runs once per client; a reconnect keeps features that
+        // were disable()d after an "unknown command" or NOPERM answer.
+        $this->capabilities ??= ServerCapabilities::fromHello(
+            $reply,
+            $this->features,
+            fn (): string => $this->infoServer(),
+        );
 
         if ($this->database !== 0) {
             $this->write(CommandEncoder::encode(['SELECT', (string) $this->database]));
@@ -186,19 +299,90 @@ final class Resp3Client implements Resp3ClientInterface
         }
     }
 
+    /**
+     * Read one regular reply. Pushes that arrived before it, or that sit
+     * fully buffered behind it, move to $pendingPushes when a listener is
+     * set and are dropped otherwise, so the parser queue cannot grow.
+     */
     private function readReply(): mixed
     {
-        // Drive the parser by reading chunks until a complete top-level message.
-        while (!$this->parser->hasNext()) {
-            $chunk = @fread($this->socket, $this->readBufferSize);
-            if ($chunk === false || $chunk === '') {
-                $meta = is_resource($this->socket) ? stream_get_meta_data($this->socket) : ['timed_out' => true, 'eof' => true];
-                $this->close();
-                $reason = $meta['timed_out'] ?? false ? 'read timeout' : 'connection closed';
-                throw new ConnectionException("Socket read failed: {$reason}");
+        try {
+            while (!$this->parser->hasNext()) {
+                $this->fill();
             }
-            $this->parser->feed($chunk);
+            $reply = $this->parser->next();
+
+            while (($push = $this->parser->nextPush()) !== null) {
+                if ($this->pushListener !== null) {
+                    $this->pendingPushes[] = $push;
+                }
+            }
+        } catch (RedisException $e) {
+            $this->protocolFault($e);
         }
-        return $this->parser->next();
+        return $reply;
+    }
+
+    /** Block for the next chunk of bytes and feed it to the parser. */
+    private function fill(): void
+    {
+        $chunk = @fread($this->socket, $this->readBufferSize);
+        if ($chunk === false || $chunk === '') {
+            $meta = is_resource($this->socket) ? stream_get_meta_data($this->socket) : ['timed_out' => true, 'eof' => true];
+            $this->close();
+            $reason = $meta['timed_out'] ?? false ? 'read timeout' : 'connection closed';
+            throw new ConnectionException("Socket read failed: {$reason}");
+        }
+        $this->parser->feed($chunk);
+    }
+
+    /**
+     * A PROTOCOL fault means malformed wire bytes: the parser is latched and
+     * unread bytes may still sit in the socket, so reset() alone is not
+     * enough. Drop the connection; the next command reconnects. Any other
+     * RedisException is not a wire fault and is rethrown unchanged.
+     */
+    private function protocolFault(RedisException $e): never
+    {
+        if ($e->prefix !== 'PROTOCOL') {
+            throw $e;
+        }
+        $this->close();
+        throw new ConnectionException('protocol error: ' . $e->getMessage(), 0, $e);
+    }
+
+    /** Hand pushes read during the last command() or pipeline() to the listener. */
+    private function flushPushes(): void
+    {
+        if ($this->pendingPushes === []) {
+            return;
+        }
+        $pushes = $this->pendingPushes;
+        $this->pendingPushes = [];
+        if ($this->pushListener === null) {
+            return;
+        }
+        foreach ($pushes as $push) {
+            ($this->pushListener)($push);
+        }
+    }
+
+    /**
+     * `INFO server` text, for telling Valkey in Redis compatibility mode
+     * apart from Redis 7.2. An error reply (for example NOPERM) yields ''.
+     */
+    private function infoServer(): string
+    {
+        $this->write(CommandEncoder::encode(['INFO', 'server']));
+        $reply = $this->readReply();
+        if ($reply instanceof \Resp3\VerbatimString) {
+            return $reply->value;
+        }
+        return is_string($reply) ? $reply : '';
+    }
+
+    private static function newParser(): Parser
+    {
+        return new Parser(queuePushes: true);
     }
 }

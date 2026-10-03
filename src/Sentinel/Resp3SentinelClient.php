@@ -2,9 +2,11 @@
 
 namespace Resp3\Laravel\Sentinel;
 
+use Closure;
 use Resp3\Laravel\Client\ConnectionException;
 use Resp3\Laravel\Client\Resp3Client;
 use Resp3\Laravel\Client\Resp3ClientInterface;
+use Resp3\Laravel\Client\ServerCapabilities;
 use Resp3\RedisException;
 
 
@@ -29,6 +31,7 @@ final class Resp3SentinelClient implements Resp3ClientInterface
         private readonly bool $persistent = false,
         private readonly array $tlsOptions = [],
         private readonly ?\Closure $clientFactory = null,
+        private readonly array $features = [],
     ) {}
 
     public function command(string $name, mixed ...$args): mixed
@@ -41,9 +44,10 @@ final class Resp3SentinelClient implements Resp3ClientInterface
             return $this->client()->command($name, ...$args);
         }
 
-        if ($reply instanceof RedisException && str_starts_with($reply->getMessage(), 'READONLY ')) {
-            // Master was demoted gracefully; the connection still works but
-            // server refuses writes. Rediscover and retry once.
+        if ($reply instanceof RedisException && in_array($reply->prefix, ['READONLY', 'MASTERDOWN'], true)) {
+            // Master was demoted (READONLY) or a replica lost its master
+            // (MASTERDOWN); the socket still works but the node cannot serve
+            // the command. Rediscover and retry once.
             $this->reset();
             return $this->client()->command($name, ...$args);
         }
@@ -54,6 +58,33 @@ final class Resp3SentinelClient implements Resp3ClientInterface
     public function readNext(): mixed
     {
         return $this->client()->readNext();
+    }
+
+    public function send(string $name, mixed ...$args): void
+    {
+        try {
+            $this->client()->send($name, ...$args);
+        } catch (ConnectionException) {
+            $this->reset();
+            $this->client()->send($name, ...$args);
+        }
+    }
+
+    public function drainPushes(): array
+    {
+        // A fresh connection has no pushes; never discover just to drain.
+        return $this->current?->isConnected() ? $this->current->drainPushes() : [];
+    }
+
+    public function setPushListener(?Closure $listener): void
+    {
+        $this->pushListener = $listener;
+        $this->current?->setPushListener($listener);
+    }
+
+    public function capabilities(): ServerCapabilities
+    {
+        return $this->client()->capabilities();
     }
 
     public function pipeline(array $commands): array
@@ -85,6 +116,8 @@ final class Resp3SentinelClient implements Resp3ClientInterface
 
     private ?array $currentAddr = null;
 
+    private ?Closure $pushListener = null;
+
     private function client(): Resp3ClientInterface
     {
         if ($this->current?->isConnected()) {
@@ -96,6 +129,7 @@ final class Resp3SentinelClient implements Resp3ClientInterface
 
         if ($this->clientFactory !== null) {
             $this->current = ($this->clientFactory)($addr);
+            $this->current->setPushListener($this->pushListener);
             return $this->current;
         }
 
@@ -109,7 +143,9 @@ final class Resp3SentinelClient implements Resp3ClientInterface
             timeout: $this->timeout,
             persistent: $this->persistent,
             tlsOptions: $this->tlsOptions,
+            features: $this->features,
         );
+        $this->current->setPushListener($this->pushListener);
         return $this->current;
     }
 

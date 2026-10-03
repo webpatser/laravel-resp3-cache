@@ -6,7 +6,7 @@
     "keywords": ["laravel", "cache", "redis", "valkey", "resp3", "php-resp3"],
     "require": {
         "php": "^8.4",
-        "ext-resp3": "*",
+        "ext-resp3": "^0.2",
         "illuminate/contracts": "^11.0|^12.0|^13.0",
         "illuminate/redis": "^11.0|^12.0|^13.0",
         "illuminate/support": "^11.0|^12.0|^13.0"

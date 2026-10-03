@@ -12,6 +12,11 @@ use Resp3\Laravel\Connections\Resp3Connection;
  * Registered via Redis::extend('resp3', fn () => new Resp3Connector()).
  * The framework calls connect() once per named connection and caches the
  * result.
+ *
+ * The `options.prefix` connection option is not supported: this driver
+ * never rewrites keys at the connection layer (phpredis does, via
+ * OPT_PREFIX). Set `prefix` on the cache store (config/cache.php, or the
+ * global `cache.prefix`) instead; RedisStore applies it to every key.
  */
 final class Resp3Connector implements Connector
 {
@@ -40,6 +45,7 @@ final class Resp3Connector implements Connector
             timeout:  (float) ($options['read_timeout'] ?? $options['timeout'] ?? 5.0),
             persistent: (bool) ($options['persistent'] ?? false),
             tlsOptions: $config['ssl'] ?? [],
+            features: is_array($options['features'] ?? null) ? $options['features'] : [],
         );
 
         return new Resp3Connection($client, $config);
