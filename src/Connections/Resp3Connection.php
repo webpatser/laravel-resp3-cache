@@ -11,7 +11,10 @@ use Resp3\Laravel\Client\Resp3Client;
 use Resp3\Laravel\Client\Resp3ClientInterface;
 use Resp3\Laravel\Client\ServerCapabilities;
 use Resp3\Laravel\Client\ServerException;
+use Resp3\Laravel\Tracking\TrackableClient;
+use Resp3\PushMessage;
 use Resp3\RedisException;
+use LogicException;
 use Throwable;
 
 /**
@@ -124,6 +127,86 @@ class Resp3Connection extends Connection
     public function capabilities(): ServerCapabilities
     {
         return $this->client->capabilities();
+    }
+
+    // ------------------------------------------------------------------ client-side caching
+
+    /**
+     * Push frames (tracking invalidations) already sent by the server,
+     * collected without blocking.
+     *
+     * @internal Used by ClientSideCache.
+     * @return list<PushMessage>
+     */
+    public function pollPushes(): array
+    {
+        return $this->client->drainPushes();
+    }
+
+    /**
+     * HELLO id of the live connection, or null when the socket is closed or
+     * the client cannot report it.
+     *
+     * @internal Used by ClientSideCache.
+     */
+    public function trackingId(): ?int
+    {
+        return $this->client instanceof TrackableClient ? $this->client->connectionId() : null;
+    }
+
+    /**
+     * A read for client-side caching, in one round trip on this client's own
+     * socket (the master for sentinel, never a replica): `CLIENT CACHING YES`
+     * (OPTIN mode), then GET or MGET, then one PTTL per key so the local copy
+     * never outlives the server key. Fires CommandExecuted for each command
+     * sent. Returns the read reply, whether the read is tracked (the CLIENT
+     * CACHING reply was OK) and the PTTL per key in milliseconds (-1 no
+     * expiry, -2 gone, null when PTTL failed), aligned with the keys.
+     *
+     * @internal Used by ClientSideCache.
+     * @param  'get'|'mget'  $method
+     * @param  list<string>  $args  the keys
+     * @return array{0: mixed, 1: bool, 2: list<int|null>}
+     * @throws ServerException when the read itself fails
+     * @throws LogicException inside MULTI on this connection
+     */
+    public function trackedRead(string $method, array $args, bool $optIn): array
+    {
+        if ($this->multiBuffer !== null) {
+            throw new LogicException('Client-side cached reads cannot run inside MULTI on the same connection.');
+        }
+
+        $commands = $optIn ? [['CLIENT', 'CACHING', 'YES']] : [];
+        $commands[] = [strtoupper($method), ...$args];
+        foreach ($args as $key) {
+            $commands[] = ['PTTL', $key];
+        }
+        $offset = $optIn ? 1 : 0;
+        $start = microtime(true);
+
+        try {
+            $replies = $this->client->pipeline($commands);
+            $reply = $this->throwIfError($replies[$offset] ?? null);
+        } catch (Throwable $e) {
+            $this->events?->dispatch(new CommandFailed($method, $args, $e, $this));
+            throw $e;
+        }
+
+        $elapsed = round((microtime(true) - $start) * 1000, 2);
+        $tracked = !$optIn || ($replies[0] ?? null) === 'OK';
+        if ($optIn) {
+            $this->events?->dispatch(new CommandExecuted('client', ['CACHING', 'YES'], $elapsed, $this));
+        }
+        $this->events?->dispatch(new CommandExecuted($method, $args, $elapsed, $this));
+
+        $ttls = [];
+        foreach ($args as $index => $key) {
+            $ttl = $replies[$offset + 1 + $index] ?? null;
+            $ttls[] = is_int($ttl) ? $ttl : null;
+            $this->events?->dispatch(new CommandExecuted('pttl', [$key], $elapsed, $this));
+        }
+
+        return [$method === 'get' && $reply === false ? null : $reply, $tracked, $ttls];
     }
 
     // ------------------------------------------------------------------ explicit Redis API

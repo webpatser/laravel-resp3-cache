@@ -21,7 +21,7 @@ use RuntimeException;
  *                            the sentinel cluster (e.g. 'mymaster').
  *       - sentinel_password: optional sentinel-side password.
  *       - password:          optional data-plane password.
- *       - database, timeout, persistent, scheme, ssl: forwarded to the
+ *       - database, timeout, persistent, persistent_id, scheme, ssl: forwarded to the
  *                            data-plane Resp3Client just like the
  *                            single-node connector.
  */
@@ -77,6 +77,9 @@ final class Resp3SentinelConnector implements Connector
             persistent: $persistent,
             tlsOptions: $tlsOptions,
             features: is_array($options['features'] ?? null) ? $options['features'] : [],
+            // Same fallback as Resp3Connector: options first, then the
+            // connection config (here the first seed entry).
+            persistentId: (string) ($options['persistent_id'] ?? $config[0]['persistent_id'] ?? ''),
         );
 
         $replicaPool = null;

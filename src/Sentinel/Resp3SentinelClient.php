@@ -7,6 +7,7 @@ use Resp3\Laravel\Client\ConnectionException;
 use Resp3\Laravel\Client\Resp3Client;
 use Resp3\Laravel\Client\Resp3ClientInterface;
 use Resp3\Laravel\Client\ServerCapabilities;
+use Resp3\Laravel\Tracking\TrackableClient;
 use Resp3\RedisException;
 
 
@@ -17,7 +18,7 @@ use Resp3\RedisException;
  * reconnects when the data-plane connection breaks or the master is
  * demoted to a replica.
  */
-final class Resp3SentinelClient implements Resp3ClientInterface
+final class Resp3SentinelClient implements Resp3ClientInterface, TrackableClient
 {
     private ?Resp3ClientInterface $current = null;
 
@@ -32,6 +33,7 @@ final class Resp3SentinelClient implements Resp3ClientInterface
         private readonly array $tlsOptions = [],
         private readonly ?\Closure $clientFactory = null,
         private readonly array $features = [],
+        private readonly string $persistentId = '',
     ) {}
 
     public function command(string $name, mixed ...$args): mixed
@@ -82,9 +84,39 @@ final class Resp3SentinelClient implements Resp3ClientInterface
         $this->current?->setPushListener($listener);
     }
 
+    /** Follows the master like the push listener: every client built after a failover gets it too. */
+    public function setTrackingListener(?Closure $listener): void
+    {
+        $this->trackingListener = $listener;
+        if ($this->current instanceof TrackableClient) {
+            $this->current->setTrackingListener($listener);
+        }
+    }
+
     public function capabilities(): ServerCapabilities
     {
         return $this->client()->capabilities();
+    }
+
+    public function connectionId(): ?int
+    {
+        return $this->current instanceof TrackableClient && $this->current->isConnected()
+            ? $this->current->connectionId()
+            : null;
+    }
+
+    /** The hook follows the master: every client built after a failover gets it too. */
+    public function onConnect(?Closure $hook): void
+    {
+        $this->connectHook = $hook;
+        if ($this->current instanceof TrackableClient) {
+            $this->current->onConnect($hook);
+        }
+    }
+
+    public function isPersistent(): bool
+    {
+        return $this->persistent;
     }
 
     public function pipeline(array $commands): array
@@ -118,6 +150,10 @@ final class Resp3SentinelClient implements Resp3ClientInterface
 
     private ?Closure $pushListener = null;
 
+    private ?Closure $trackingListener = null;
+
+    private ?Closure $connectHook = null;
+
     private function client(): Resp3ClientInterface
     {
         if ($this->current?->isConnected()) {
@@ -130,6 +166,16 @@ final class Resp3SentinelClient implements Resp3ClientInterface
         if ($this->clientFactory !== null) {
             $this->current = ($this->clientFactory)($addr);
             $this->current->setPushListener($this->pushListener);
+            if ($this->current instanceof TrackableClient) {
+                // Listener before hook: pushes read during the hook's
+                // commands must reach client-side caching.
+                if ($this->trackingListener !== null) {
+                    $this->current->setTrackingListener($this->trackingListener);
+                }
+                if ($this->connectHook !== null) {
+                    $this->current->onConnect($this->connectHook);
+                }
+            }
             return $this->current;
         }
 
@@ -144,8 +190,13 @@ final class Resp3SentinelClient implements Resp3ClientInterface
             persistent: $this->persistent,
             tlsOptions: $this->tlsOptions,
             features: $this->features,
+            persistentId: $this->persistentId,
         );
         $this->current->setPushListener($this->pushListener);
+        $this->current->setTrackingListener($this->trackingListener);
+        if ($this->connectHook !== null) {
+            $this->current->onConnect($this->connectHook);
+        }
         return $this->current;
     }
 

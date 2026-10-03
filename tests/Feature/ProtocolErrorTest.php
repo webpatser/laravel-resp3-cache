@@ -28,6 +28,7 @@ final class ProtocolErrorTest extends TestCase
     protected function tearDown(): void
     {
         $this->server?->stop();
+        $this->stopNonceServer();
     }
 
     /** @param list<list<string>> $connections */
@@ -121,5 +122,161 @@ final class ProtocolErrorTest extends TestCase
         ]]);
 
         $this->assertSame('PONG', $client->command('PING'));
+    }
+
+    public function test_stray_reply_before_the_hello_reply_on_a_persistent_socket_reconnects_once(): void
+    {
+        // The handshake of a persistent socket is HELLO, SELECT and PING
+        // <nonce> in one write. The first socket answers with a stray reply
+        // ahead of the HELLO map (the tail of a push cut off when the
+        // previous request ended); the client must drop it and redo the
+        // handshake on a fresh socket.
+        $port = $this->startNonceServer([
+            ["+STRAY\r\n" . FakeRespServer::HELLO . "+OK\r\n{nonce}"],
+            [FakeRespServer::HELLO . "+OK\r\n{nonce}", "+PONG\r\n"],
+        ]);
+        $client = $this->persistentClient($port);
+
+        $this->assertSame('PONG', $client->command('PING'));
+        $this->assertSame(2, substr_count($this->nonceServerReceived(), "HELLO\r\n"), 'one reconnect');
+        $client->close();
+    }
+
+    public function test_push_queued_before_the_hello_reply_is_not_out_of_step(): void
+    {
+        // Pushes waiting on a reused socket (tracking invalidations) are not
+        // replies: they reach the listener and the socket is kept.
+        $port = $this->startNonceServer([
+            [">2\r\n\$4\r\nnote\r\n\$1\r\nx\r\n" . FakeRespServer::HELLO . "+OK\r\n{nonce}", "+PONG\r\n"],
+        ]);
+        $client = $this->persistentClient($port);
+        $pushes = [];
+        $client->setTrackingListener(function (PushMessage $push) use (&$pushes): void {
+            $pushes[] = $push;
+        });
+
+        $this->assertSame('PONG', $client->command('PING'));
+        $this->assertCount(1, $pushes);
+        $this->assertSame(1, substr_count($this->nonceServerReceived(), "HELLO\r\n"), 'no reconnect');
+        $client->close();
+    }
+
+    public function test_persistent_socket_out_of_step_twice_throws(): void
+    {
+        $port = $this->startNonceServer([
+            ["+STRAY\r\n" . FakeRespServer::HELLO . "+OK\r\n{nonce}"],
+            ["+STRAY\r\n" . FakeRespServer::HELLO . "+OK\r\n{nonce}"],
+        ]);
+        $client = $this->persistentClient($port);
+
+        try {
+            $client->command('PING');
+            $this->fail('A handshake out of step twice did not throw');
+        } catch (ConnectionException $e) {
+            $this->assertStringContainsString('HELLO failed', $e->getMessage());
+        }
+        $this->assertFalse($client->isConnected());
+    }
+
+    // ------------------------------------------------------------------ nonce-echo server
+
+    /** @var resource|null */
+    private $nonceProcess = null;
+
+    /** @var array<int, resource> */
+    private array $noncePipes = [];
+
+    private ?string $nonceScript = null;
+
+    private ?string $nonceLog = null;
+
+    private function persistentClient(int $port): Resp3Client
+    {
+        return new Resp3Client(
+            host: '127.0.0.1',
+            port: $port,
+            timeout: 3.0,
+            persistent: true,
+            persistentId: 'protocol-' . bin2hex(random_bytes(6)),
+        );
+    }
+
+    /**
+     * A scripted server like FakeRespServer (one reply per chunk received,
+     * one list of replies per connection) that also replaces `{nonce}` in a
+     * reply with the bulk string the client sent as the PING argument in
+     * that chunk, which the persistent handshake needs echoed.
+     *
+     * @param  list<list<string>>  $connections
+     */
+    private function startNonceServer(array $connections): int
+    {
+        $this->nonceScript = tempnam(sys_get_temp_dir(), 'r3-nonce-');
+        $this->nonceLog = tempnam(sys_get_temp_dir(), 'r3-noncelog-');
+        file_put_contents($this->nonceScript, <<<'PHP'
+        <?php
+        $connections = json_decode(base64_decode($argv[1]), true);
+        $server = stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
+        if ($server === false) { fwrite(STDERR, "bind failed: $errstr\n"); exit(1); }
+        $name = stream_socket_get_name($server, false);
+        echo substr($name, strrpos($name, ':') + 1), "\n";
+        fflush(STDOUT);
+
+        $deadline = time() + 15;
+        foreach ($connections as $replies) {
+            $client = @stream_socket_accept($server, max(1, $deadline - time()));
+            if ($client === false) { exit(2); }
+            foreach ($replies as $reply) {
+                $chunk = fread($client, 65536);
+                if ($chunk === '' || $chunk === false) { break; }
+                file_put_contents($argv[2], $chunk, FILE_APPEND);
+                if (preg_match('/PING\r\n\$\d+\r\n([0-9a-f]+)\r\n/', $chunk, $m)) {
+                    $reply = str_replace('{nonce}', '$' . strlen($m[1]) . "\r\n" . $m[1] . "\r\n", $reply);
+                }
+                fwrite($client, $reply);
+            }
+            stream_set_timeout($client, max(1, $deadline - time()));
+            while (($chunk = fread($client, 65536)) !== '' && $chunk !== false) {}
+            fclose($client);
+        }
+        PHP);
+
+        $this->nonceProcess = proc_open(
+            [PHP_BINARY, $this->nonceScript, base64_encode(json_encode($connections, JSON_THROW_ON_ERROR)), $this->nonceLog],
+            [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+            $this->noncePipes,
+        );
+        $line = is_resource($this->nonceProcess) ? fgets($this->noncePipes[1]) : false;
+        if ($line === false || !ctype_digit(trim($line))) {
+            $this->fail('Nonce server did not report a port');
+        }
+
+        return (int) trim($line);
+    }
+
+    private function nonceServerReceived(): string
+    {
+        clearstatcache(true, (string) $this->nonceLog);
+
+        return (string) @file_get_contents((string) $this->nonceLog);
+    }
+
+    private function stopNonceServer(): void
+    {
+        if (is_resource($this->nonceProcess)) {
+            @proc_terminate($this->nonceProcess);
+            foreach ($this->noncePipes as $pipe) {
+                if (is_resource($pipe)) {
+                    @fclose($pipe);
+                }
+            }
+            @proc_close($this->nonceProcess);
+        }
+        $this->nonceProcess = null;
+        foreach ([$this->nonceScript, $this->nonceLog] as $path) {
+            if ($path !== null && file_exists($path)) {
+                @unlink($path);
+            }
+        }
     }
 }

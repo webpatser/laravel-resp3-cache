@@ -7,6 +7,7 @@ use Illuminate\Redis\RedisManager;
 use Illuminate\Support\ServiceProvider;
 use Resp3\Laravel\Cache\Resp3Store;
 use Resp3\Laravel\Connectors\Resp3Connector;
+use Resp3\Laravel\Tracking\TrackingConfig;
 
 /**
  * Registers the 'resp3' Redis client with Laravel's RedisManager.
@@ -17,7 +18,8 @@ use Resp3\Laravel\Connectors\Resp3Connector;
  *
  * Also registers the `resp3` cache driver (Resp3Store): a cache store with
  * `'driver' => 'resp3'` takes the same options as the `redis` driver
- * (connection, lock_connection, prefix, serializable_classes).
+ * (connection, lock_connection, prefix, serializable_classes), plus an
+ * optional `client_tracking` block for client-side caching (TrackingConfig).
  */
 final class Resp3ServiceProvider extends ServiceProvider
 {
@@ -41,6 +43,16 @@ final class Resp3ServiceProvider extends ServiceProvider
                 }
 
                 $store = new Resp3Store(...$arguments);
+
+                // Client-side caching is opt-in; without an enabled
+                // `client_tracking` block the store sends no extra command.
+                // The APCu scope secret is the app key, never a store option.
+                if (is_array($config['client_tracking'] ?? null)) {
+                    $store->setClientTracking(TrackingConfig::fromArray(
+                        $config['client_tracking'],
+                        (string) ($app['config']->get('app.key') ?? ''),
+                    ));
+                }
 
                 return $this->repository(
                     $store->setLockConnection($config['lock_connection'] ?? $connection),

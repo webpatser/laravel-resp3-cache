@@ -11,6 +11,8 @@ use Resp3\Laravel\Client\ServerException;
 use Resp3\Laravel\Cluster\CRC16;
 use Resp3\Laravel\Connections\Resp3ClusterConnection;
 use Resp3\Laravel\Connections\Resp3Connection;
+use Resp3\Laravel\Tracking\ClientSideCache;
+use Resp3\Laravel\Tracking\TrackingConfig;
 
 /**
  * Cache store for the `resp3` cache driver.
@@ -32,11 +34,81 @@ use Resp3\Laravel\Connections\Resp3Connection;
  *
  * Connections that are not Resp3Connection get the plain RedisStore
  * behaviour.
+ *
+ * Optional client-side caching (`client_tracking` in the store config, see
+ * TrackingConfig): get() and many() read through a process-local copy that
+ * the server invalidates with CLIENT TRACKING pushes; put, putMany, forever,
+ * forget, increment, decrement and putIfEquals write to the server and then
+ * drop the local copy; flush() clears the local copy, then runs FLUSHDB. add()
+ * and locks bypass it. Off by default; while off no extra command is sent.
  */
 class Resp3Store extends RedisStore
 {
+    /** Client-side caching settings; null leaves every code path untouched. */
+    protected ?TrackingConfig $tracking = null;
+
+    /**
+     * Turn on client-side caching (CLIENT TRACKING) for this store, or off
+     * with null / a disabled config. Applies to single node and sentinel
+     * connections; cluster connections ignore it.
+     */
+    public function setClientTracking(?TrackingConfig $config): static
+    {
+        $this->tracking = $config?->enabled ? $config : null;
+
+        return $this;
+    }
+
+    public function clientTracking(): ?TrackingConfig
+    {
+        return $this->tracking;
+    }
+
+    /**
+     * The client-side cache of the store's connection, or null when tracking
+     * is off or the connection cannot track.
+     */
+    public function clientSideCache(): ?ClientSideCache
+    {
+        return $this->trackingFor($this->connection());
+    }
+
+    public function get($key)
+    {
+        if ($this->tracking === null) {
+            return parent::get($key);
+        }
+
+        $connection = $this->connection();
+        $cache = $this->trackingFor($connection);
+        if ($cache === null) {
+            return parent::get($key);
+        }
+
+        $value = $cache->get($connection, $this->prefix.$key);
+
+        return $value !== null ? $this->connectionAwareUnserialize($value, $connection) : null;
+    }
+
     public function many(array $keys)
     {
+        if ($this->tracking !== null && count($keys) > 0) {
+            $connection = $this->connection();
+            $cache = $this->trackingFor($connection);
+            if ($cache !== null) {
+                $keys = array_values($keys);
+                $values = $cache->many($connection, array_map(fn ($key) => $this->prefix.$key, $keys));
+
+                $results = [];
+                foreach ($keys as $index => $key) {
+                    $value = $values[$index] ?? null;
+                    $results[$key] = $value !== null ? $this->connectionAwareUnserialize($value, $connection) : null;
+                }
+
+                return $results;
+            }
+        }
+
         $connection = $this->connection();
 
         if (count($keys) === 0 || !$connection instanceof Resp3ClusterConnection) {
@@ -67,6 +139,94 @@ class Resp3Store extends RedisStore
     }
 
     public function putMany(array $values, $seconds)
+    {
+        if ($this->tracking === null) {
+            return $this->putManyOnServer($values, $seconds);
+        }
+
+        try {
+            return $this->putManyOnServer($values, $seconds);
+        } finally {
+            $this->forgetLocally(...array_keys($values));
+        }
+    }
+
+    public function put($key, $value, $seconds)
+    {
+        if ($this->tracking === null) {
+            return parent::put($key, $value, $seconds);
+        }
+
+        try {
+            return parent::put($key, $value, $seconds);
+        } finally {
+            $this->forgetLocally($key);
+        }
+    }
+
+    public function forever($key, $value)
+    {
+        if ($this->tracking === null) {
+            return parent::forever($key, $value);
+        }
+
+        try {
+            return parent::forever($key, $value);
+        } finally {
+            $this->forgetLocally($key);
+        }
+    }
+
+    public function forget($key)
+    {
+        if ($this->tracking === null) {
+            return parent::forget($key);
+        }
+
+        try {
+            return parent::forget($key);
+        } finally {
+            $this->forgetLocally($key);
+        }
+    }
+
+    public function increment($key, $value = 1)
+    {
+        if ($this->tracking === null) {
+            return parent::increment($key, $value);
+        }
+
+        try {
+            return parent::increment($key, $value);
+        } finally {
+            $this->forgetLocally($key);
+        }
+    }
+
+    public function decrement($key, $value = 1)
+    {
+        if ($this->tracking === null) {
+            return parent::decrement($key, $value);
+        }
+
+        try {
+            return parent::decrement($key, $value);
+        } finally {
+            $this->forgetLocally($key);
+        }
+    }
+
+    /** With client-side caching the local entries go first, then FLUSHDB. */
+    public function flush()
+    {
+        if ($this->tracking !== null) {
+            $this->trackingFor($this->connection())?->clear();
+        }
+
+        return parent::flush();
+    }
+
+    private function putManyOnServer(array $values, $seconds): bool
     {
         $connection = $this->connection();
 
@@ -179,6 +339,10 @@ class Resp3Store extends RedisStore
         } catch (ServerException $e) {
             self::disableIfUnsupported($connection, ServerCapabilities::SET_IF_EQ, $e, syntaxErrorMeansUnsupported: true);
             throw self::unsupported('putIfEquals', 'SET IFEQ', $e);
+        } finally {
+            if ($this->tracking !== null) {
+                $this->forgetLocally($key);
+            }
         }
     }
 
@@ -196,6 +360,32 @@ class Resp3Store extends RedisStore
     public function restoreLock($name, $owner)
     {
         return $this->lock($name, 0, $owner);
+    }
+
+    // ------------------------------------------------------------------ client-side caching helpers
+
+    private function trackingFor(Connection $connection): ?ClientSideCache
+    {
+        if ($this->tracking === null || !$connection instanceof Resp3Connection) {
+            return null;
+        }
+
+        $cache = ClientSideCache::for($connection, $this->tracking, $this->prefix);
+
+        return $cache?->isEnabled() ? $cache : null;
+    }
+
+    /** Drop the local copies of unprefixed cache keys after a server write. */
+    private function forgetLocally(string|int ...$keys): void
+    {
+        $cache = $this->trackingFor($this->connection());
+        if ($cache === null) {
+            return;
+        }
+
+        foreach ($keys as $key) {
+            $cache->forget($this->prefix.$key);
+        }
     }
 
     // ------------------------------------------------------------------ capability helpers

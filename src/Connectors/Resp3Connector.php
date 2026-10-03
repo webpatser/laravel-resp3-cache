@@ -46,6 +46,9 @@ final class Resp3Connector implements Connector
             persistent: (bool) ($options['persistent'] ?? false),
             tlsOptions: $config['ssl'] ?? [],
             features: is_array($options['features'] ?? null) ? $options['features'] : [],
+            // phpredis reads persistent_id from the connection config; accept
+            // both places, options first.
+            persistentId: (string) ($options['persistent_id'] ?? $config['persistent_id'] ?? ''),
         );
 
         return new Resp3Connection($client, $config);
