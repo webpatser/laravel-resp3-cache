@@ -7,7 +7,12 @@ minor and are called out in the entry.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- `Resp3Lock::refresh()` declared a typed `?int $seconds` parameter, which
+  is incompatible with the untyped `RedisLock::refresh($seconds = null)` on
+  Laravel 12 and 13 and caused a fatal error when the class was loaded. The
+  parameter is untyped again; behaviour is unchanged.
 
 ## [0.7.0] - 2026-10-03
 

@@ -52,9 +52,13 @@ LUA;
      * Extend the lock's TTL to $seconds (default: the TTL it was created
      * with) while it is still held by this owner.
      *
+     * Untyped parameter to stay compatible with RedisLock::refresh() on
+     * Laravel 12 and 13.
+     *
+     * @param  int|null  $seconds
      * @return bool false when the lock expired or is held by another owner
      */
-    public function refresh(?int $seconds = null): bool
+    public function refresh($seconds = null): bool
     {
         $seconds ??= $this->seconds;
 
